@@ -384,6 +384,11 @@ def main():
 
     # History table
     store = PredictionStore(use_gsheets=False)
+    
+    # Verify past predictions using the last 50 closed bars
+    price_map = {dt.isoformat(): p for dt, p in zip(d["chart_dates"], d["chart_prices"])}
+    store.verify_predictions(price_map)
+
     if store.should_save_new_prediction():
         store.save_prediction({
             "timestamp": d["prediction_time"], "current_price": current,
