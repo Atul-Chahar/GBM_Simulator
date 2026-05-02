@@ -243,14 +243,10 @@ section[data-testid="stSidebar"] { display: none !important; }
 
 /* ── Chart Section ─────────────────────────────────────── */
 .chart-section {
-    border: 1px solid var(--border-default);
-    background: var(--bg-surface);
-    padding: 24px;
-    margin-bottom: 48px;
+    padding-top: 24px;
+    margin-bottom: -24px; /* Pull the chart up closer to the header */
     animation: fadeInUp 0.7s ease-out 0.4s both;
-    transition: border-color 0.3s ease;
 }
-.chart-section:hover { border-color: var(--border-strong); }
 .chart-header {
     display: flex;
     justify-content: space-between;

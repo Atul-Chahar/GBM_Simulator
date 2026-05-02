@@ -109,7 +109,7 @@ def get_live_data():
         "mean_prediction": float(mean_p), "model_info": info,
         "chart_dates": cp.index.tolist(), "chart_prices": cp.values.tolist(),
         "chart_lows": cl, "chart_highs": ch,
-        "prediction_time": datetime.now(timezone.utc).isoformat(),
+        "prediction_time": (prices.index[-1] + pd.Timedelta(hours=1)).isoformat(),
         # Extra data
         "log_returns": log_ret.tail(100).values.tolist(),
         "log_ret_dates": log_ret.tail(100).index.tolist(),
