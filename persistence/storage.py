@@ -88,10 +88,14 @@ class PredictionStore:
             Must contain: timestamp, current_price, predicted_low_95,
             predicted_high_95. actual_close and hit are filled later.
         """
+        ts_raw = prediction.get("timestamp", datetime.now(timezone.utc).isoformat())
+        try:
+            ts_iso = pd.to_datetime(ts_raw).tz_convert('UTC').isoformat()
+        except Exception:
+            ts_iso = str(ts_raw)
+            
         record = {
-            "timestamp": prediction.get(
-                "timestamp", datetime.now(timezone.utc).isoformat()
-            ),
+            "timestamp": ts_iso,
             "current_price": prediction.get("current_price", 0),
             "predicted_low_95": prediction.get("predicted_low_95", 0),
             "predicted_high_95": prediction.get("predicted_high_95", 0),
@@ -142,8 +146,14 @@ class PredictionStore:
                 continue
 
             ts = record.get("timestamp", "")
-            if ts in current_prices:
-                actual = current_prices[ts]
+            try:
+                # Normalize to standard ISO string to handle Google Sheets formatting quirks (e.g. replacing T with space)
+                ts_iso = pd.to_datetime(ts).tz_convert('UTC').isoformat()
+            except Exception:
+                ts_iso = str(ts)
+                
+            if ts_iso in current_prices:
+                actual = current_prices[ts_iso]
                 low = record["predicted_low_95"]
                 high = record["predicted_high_95"]
 

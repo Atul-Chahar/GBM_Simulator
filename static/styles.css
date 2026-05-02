@@ -244,7 +244,7 @@ section[data-testid="stSidebar"] { display: none !important; }
 /* ── Chart Section ─────────────────────────────────────── */
 .chart-section {
     padding-top: 24px;
-    margin-bottom: -24px; /* Pull the chart up closer to the header */
+    margin-bottom: 0px; /* Removed negative margin to prevent overlap */
     animation: fadeInUp 0.7s ease-out 0.4s both;
 }
 .chart-header {
