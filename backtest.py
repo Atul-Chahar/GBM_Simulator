@@ -23,7 +23,7 @@ import sys
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from tqdm import tqdm
+
 
 from model.data_fetcher import fetch_btc_klines, get_close_prices
 from model.gbm_engine import GBMEngine
@@ -106,8 +106,11 @@ def run_backtest(
     # ── Walk-forward loop ────────────────────────────────────────
     predictions = []
     engine = GBMEngine(n_sims=n_sims)
+    running_hits = 0
+    total_iters = max_start - start_idx
+    t_start = time.time()
 
-    for i in tqdm(range(start_idx, max_start), desc="Backtesting", unit="bar"):
+    for idx_count, i in enumerate(range(start_idx, max_start)):
         # STRICT NO-PEEKING: Only use data up to bar i (exclusive)
         # We predict what bar i's close price will be.
         # Training data: bars [i - train_window, i) — i.e., up to i-1
@@ -125,17 +128,19 @@ def run_backtest(
             # If model fails to fit, use a wide fallback interval
             current_price = train_prices.iloc[-1]
             fallback_width = current_price * 0.02  # 2% fallback
+            hit = coverage_hit(
+                float(prices.iloc[i]),
+                float(current_price - fallback_width),
+                float(current_price + fallback_width),
+            )
+            running_hits += hit
             predictions.append({
                 "bar_timestamp": str(prices.index[i]),
                 "current_price": float(current_price),
                 "predicted_low_95": float(current_price - fallback_width),
                 "predicted_high_95": float(current_price + fallback_width),
                 "actual_close": float(prices.iloc[i]),
-                "coverage_95": coverage_hit(
-                    float(prices.iloc[i]),
-                    float(current_price - fallback_width),
-                    float(current_price + fallback_width),
-                ),
+                "coverage_95": hit,
                 "width_95": float(2 * fallback_width),
                 "winkler_95": winkler_score(
                     float(prices.iloc[i]),
@@ -144,6 +149,11 @@ def run_backtest(
                 ),
                 "model_error": str(e),
             })
+            if len(predictions) % 10 == 0 or len(predictions) == total_iters:
+                elapsed = time.time() - t_start
+                rate = elapsed / len(predictions) if predictions else 0
+                cov = running_hits / len(predictions) if predictions else 0
+                print(f"  [{len(predictions):>4}/{total_iters}]  coverage: {cov:.1%}  |  {rate:.1f}s/bar", flush=True)
             continue
 
         # Predict next bar
@@ -152,17 +162,19 @@ def run_backtest(
         except Exception as e:
             current_price = train_prices.iloc[-1]
             fallback_width = current_price * 0.02
+            hit = coverage_hit(
+                float(prices.iloc[i]),
+                float(current_price - fallback_width),
+                float(current_price + fallback_width),
+            )
+            running_hits += hit
             predictions.append({
                 "bar_timestamp": str(prices.index[i]),
                 "current_price": float(current_price),
                 "predicted_low_95": float(current_price - fallback_width),
                 "predicted_high_95": float(current_price + fallback_width),
                 "actual_close": float(prices.iloc[i]),
-                "coverage_95": coverage_hit(
-                    float(prices.iloc[i]),
-                    float(current_price - fallback_width),
-                    float(current_price + fallback_width),
-                ),
+                "coverage_95": hit,
                 "width_95": float(2 * fallback_width),
                 "winkler_95": winkler_score(
                     float(prices.iloc[i]),
@@ -171,10 +183,16 @@ def run_backtest(
                 ),
                 "model_error": str(e),
             })
+            if len(predictions) % 10 == 0 or len(predictions) == total_iters:
+                elapsed = time.time() - t_start
+                rate = elapsed / len(predictions) if predictions else 0
+                cov = running_hits / len(predictions) if predictions else 0
+                print(f"  [{len(predictions):>4}/{total_iters}]  coverage: {cov:.1%}  |  {rate:.1f}s/bar", flush=True)
             continue
 
         actual = float(prices.iloc[i])
         hit = coverage_hit(actual, float(low), float(high))
+        running_hits += hit
         width = float(high - low)
         winkler = winkler_score(actual, float(low), float(high))
 
@@ -188,6 +206,13 @@ def run_backtest(
             "width_95": width,
             "winkler_95": winkler,
         })
+
+        # Update progress bar with live coverage
+        if len(predictions) % 10 == 0 or len(predictions) == total_iters:
+            elapsed = time.time() - t_start
+            rate = elapsed / len(predictions) if predictions else 0
+            cov = running_hits / len(predictions) if predictions else 0
+            print(f"  [{len(predictions):>4}/{total_iters}]  coverage: {cov:.1%}  |  {rate:.1f}s/bar", flush=True)
 
     # ── Save results ─────────────────────────────────────────────
     print(f"\n💾 Saving {len(predictions)} predictions to {output_file}...")

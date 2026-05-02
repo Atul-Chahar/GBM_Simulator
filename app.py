@@ -1,482 +1,410 @@
 """
-app.py — BTC Next-Hour Forecast Dashboard (Part B + C)
-=======================================================
-Live Streamlit dashboard for the AlphaI × Polaris challenge.
-
-Features:
-    - Real-time BTC price + 95% confidence interval prediction
-    - Plotly chart showing last 50 bars with CI ribbon
-    - Backtest metrics (coverage, avg width, Winkler) as headlines
-    - Prediction history (Part C bonus)
-    - Auto-refresh every 5 minutes
-    - Bitcoin-themed dark mode
-
-Usage:
-    streamlit run app.py
+app.py — BTC Next-Hour Forecast Dashboard
+==========================================
+xAI-inspired brutalist minimalism + trading dashboard density.
+JetBrains Mono display type. Dark/light theme toggle.
 """
 
-import json
-import os
-import time
-import numpy as np
-import pandas as pd
+import json, os, numpy as np, pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 from datetime import datetime, timezone, timedelta
-
 from model.data_fetcher import fetch_latest_bars, get_close_prices
 from model.gbm_engine import GBMEngine
 from model.evaluator import evaluate_predictions, format_metrics_display
 from persistence.storage import PredictionStore
 
-# ── Page Configuration ───────────────────────────────────────────
+# ── Page Config ──────────────────────────────────────────
 st.set_page_config(
-    page_title="BTC Next-Hour Forecast | AlphaI × Polaris",
-    page_icon="₿",
-    layout="wide",
-    initial_sidebar_state="collapsed",
+    page_title="BTC Forecast — AlphaI × Polaris",
+    page_icon="₿", layout="wide", initial_sidebar_state="collapsed",
 )
 
-# ── Custom CSS ───────────────────────────────────────────────────
-st.markdown("""
-<style>
-    /* Import Inter font */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+# ── Theme State ──────────────────────────────────────────
+if "theme" not in st.session_state:
+    st.session_state.theme = "dark"
 
-    * { font-family: 'Inter', sans-serif; }
+def toggle_theme():
+    st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
 
-    /* Main header styling */
-    .main-header {
-        text-align: center;
-        padding: 1rem 0 0.5rem 0;
-    }
-    .main-header h1 {
-        font-size: 2rem;
-        font-weight: 800;
-        background: linear-gradient(135deg, #F7931A 0%, #FFD700 50%, #F7931A 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.2rem;
-    }
-    .main-header p {
-        color: #888;
-        font-size: 0.9rem;
-        font-weight: 300;
-    }
+is_dark = st.session_state.theme == "dark"
 
-    /* Metric cards */
-    div[data-testid="stMetric"] {
-        background: linear-gradient(135deg, #1A1F2E 0%, #0E1117 100%);
-        border: 1px solid #2A2F3E;
-        border-radius: 12px;
-        padding: 1rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-    }
-    div[data-testid="stMetric"] label {
-        color: #888 !important;
-        font-size: 0.8rem;
-        font-weight: 500;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-        font-size: 1.8rem;
-        font-weight: 700;
-        color: #F7931A !important;
-    }
+# ── Load + Inject CSS ────────────────────────────────────
+css_path = os.path.join(os.path.dirname(__file__), "static", "styles.css")
+css = open(css_path).read() if os.path.exists(css_path) else ""
+st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
-    /* Prediction box */
-    .prediction-box {
-        background: linear-gradient(135deg, #1a2332 0%, #0d1520 100%);
-        border: 1px solid #F7931A40;
-        border-radius: 16px;
-        padding: 2rem;
-        text-align: center;
-        margin: 1rem 0;
-        box-shadow: 0 8px 32px rgba(247, 147, 26, 0.1);
-    }
-    .prediction-box .price {
-        font-size: 2.8rem;
-        font-weight: 800;
-        color: #FAFAFA;
-        margin: 0.5rem 0;
-    }
-    .prediction-box .range {
-        font-size: 1.4rem;
-        font-weight: 600;
-        color: #F7931A;
-        margin: 0.5rem 0;
-    }
-    .prediction-box .label {
-        font-size: 0.85rem;
-        color: #888;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        font-weight: 500;
-    }
-    .prediction-box .sublabel {
-        font-size: 0.75rem;
-        color: #666;
-        margin-top: 0.3rem;
-    }
-
-    /* Regime badge */
-    .regime-badge {
-        display: inline-block;
-        padding: 0.3rem 1rem;
-        border-radius: 20px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        margin-top: 0.5rem;
-    }
-
-    /* Section headers */
-    .section-header {
-        font-size: 1.1rem;
-        font-weight: 700;
-        color: #FAFAFA;
-        border-bottom: 2px solid #F7931A40;
-        padding-bottom: 0.5rem;
-        margin: 1.5rem 0 1rem 0;
-    }
-
-    /* Footer */
-    .footer {
-        text-align: center;
-        padding: 2rem 0 1rem 0;
-        color: #555;
-        font-size: 0.75rem;
-    }
-
-    /* Hide Streamlit branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-
-    /* Auto-refresh indicator */
-    .refresh-indicator {
-        text-align: right;
-        color: #555;
-        font-size: 0.7rem;
-        padding: 0.2rem 0;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Theme-specific overrides
+if is_dark:
+    st.markdown("""<style>
+    .stApp{background:#1f2228!important;color:#fff!important}
+    .metric-card,.bottom-panel{background:#1f2228!important}
+    .metrics-grid,.bottom-grid,.stats-grid{background:rgba(255,255,255,0.1)!important}
+    </style>""", unsafe_allow_html=True)
+else:
+    st.markdown("""<style>
+    .stApp{background:#fafafa!important;color:#1f2228!important}
+    .metric-card,.bottom-panel{background:#fafafa!important}
+    .metrics-grid,.bottom-grid,.stats-grid{background:rgba(0,0,0,0.1)!important}
+    .hero-price,.metric-value,.pred-range-value{color:#1f2228!important}
+    .nav-bar,.site-footer{border-color:rgba(0,0,0,0.1)!important}
+    .prediction-card,.chart-section{border-color:rgba(0,0,0,0.1)!important;
+        background:rgba(0,0,0,0.02)!important}
+    .nav-tag{border-color:rgba(0,0,0,0.15)!important;color:rgba(0,0,0,0.5)!important}
+    .hero-label,.metric-label,.pred-range-label,.panel-title,.chart-tag,
+    .pred-detail-label{color:rgba(0,0,0,0.4)!important}
+    .hero-subtitle,.metric-sub,.param-key,.footer-text,.footer-mono,
+    .chart-title{color:rgba(0,0,0,0.5)!important}
+    .param-val,.pred-detail-value{color:#1f2228!important}
+    .nav-brand{color:#1f2228!important}
+    .param-row{border-color:rgba(0,0,0,0.08)!important}
+    .param-row:hover{background:rgba(0,0,0,0.03)!important}
+    </style>""", unsafe_allow_html=True)
 
 
-# ── Cached Functions ─────────────────────────────────────────────
-
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_live_prediction():
-    """
-    Fetch latest data, run the model, return prediction.
-    Cached for 5 minutes to avoid re-computation on every interaction.
-    """
-    # Fetch latest 500 closed bars (as brief specifies)
+# ── Cached Data Functions ────────────────────────────────
+@st.cache_data(ttl=300)
+def get_live_data():
     df = fetch_latest_bars(num_bars=500)
     prices = get_close_prices(df)
-
-    # Fit GBM model
     engine = GBMEngine(n_sims=10_000)
     engine.fit(prices)
-
-    # Predict next-hour interval
     low, high, sims, mean_p = engine.predict_interval(confidence=0.95)
+    info = engine.get_model_info()
 
-    # Get model info
-    model_info = engine.get_model_info()
+    # Chart ribbon
+    pw = high - low
+    ls = engine.sigma_fig.iloc[-1]
+    cp = prices.tail(50)
+    sv = engine.sigma_fig.tail(50)
+    cl, ch = [], []
+    for i, (_, p) in enumerate(cp.items()):
+        r = sv.iloc[i] / ls if i < len(sv) and ls > 0 else 1
+        hw = (pw / 2) * r
+        cl.append(p - hw); ch.append(p + hw)
 
-    # Compute chart ribbon for last 50 bars
-    # Use the actual prediction width as reference, then scale each bar
-    # proportionally by its relative sigma (from FIGARCH)
-    pred_width = high - low
-    latest_sigma = engine.sigma_fig.iloc[-1]
+    # Extra analytics
+    log_ret = np.log(prices / prices.shift(1)).dropna()
+    vol_series = engine.sigma_fig
 
-    chart_prices = prices.tail(50)
-    sigma_vals = engine.sigma_fig.tail(50)
-    chart_lows = []
-    chart_highs = []
-    for i, (idx, price) in enumerate(chart_prices.items()):
-        if i < len(sigma_vals) and latest_sigma > 0:
-            # Scale ribbon width proportionally to each bar's sigma
-            sigma_ratio = sigma_vals.iloc[i] / latest_sigma
-            half_w = (pred_width / 2) * sigma_ratio
-        else:
-            half_w = pred_width / 2
-        chart_lows.append(price - half_w)
-        chart_highs.append(price + half_w)
+    # Hourly returns for bar chart (last 24)
+    recent_ret = log_ret.tail(24)
+
+    # Price stats
+    p24h = prices.tail(24)
+    p7d = prices.tail(168) if len(prices) >= 168 else prices
+    high_24h = p24h.max()
+    low_24h = p24h.min()
+    change_24h = (p24h.iloc[-1] - p24h.iloc[0]) / p24h.iloc[0] * 100
+    high_7d = p7d.max()
+    low_7d = p7d.min()
+    change_7d = (p7d.iloc[-1] - p7d.iloc[0]) / p7d.iloc[0] * 100
+    avg_vol_24h = log_ret.tail(24).std()
+    avg_vol_7d = log_ret.tail(168).std() if len(log_ret) >= 168 else log_ret.std()
 
     return {
         "current_price": float(prices.iloc[-1]),
-        "predicted_low": float(low),
-        "predicted_high": float(high),
-        "mean_prediction": float(mean_p),
-        "model_info": model_info,
-        "chart_dates": chart_prices.index.tolist(),
-        "chart_prices": chart_prices.values.tolist(),
-        "chart_lows": chart_lows,
-        "chart_highs": chart_highs,
+        "predicted_low": float(low), "predicted_high": float(high),
+        "mean_prediction": float(mean_p), "model_info": info,
+        "chart_dates": cp.index.tolist(), "chart_prices": cp.values.tolist(),
+        "chart_lows": cl, "chart_highs": ch,
         "prediction_time": datetime.now(timezone.utc).isoformat(),
-        "next_bar_close": _next_bar_close_time(),
+        # Extra data
+        "log_returns": log_ret.tail(100).values.tolist(),
+        "log_ret_dates": log_ret.tail(100).index.tolist(),
+        "vol_series": vol_series.tail(50).values.tolist(),
+        "vol_dates": vol_series.tail(50).index.tolist(),
+        "recent_ret": recent_ret.values.tolist(),
+        "recent_ret_dates": [d.strftime("%H:%M") for d in recent_ret.index],
+        "sims_terminal": sims.tolist()[:2000],  # subsample for histogram
+        "high_24h": float(high_24h), "low_24h": float(low_24h),
+        "change_24h": float(change_24h),
+        "high_7d": float(high_7d), "low_7d": float(low_7d),
+        "change_7d": float(change_7d),
+        "avg_vol_24h": float(avg_vol_24h), "avg_vol_7d": float(avg_vol_7d),
+        "nu": float(engine.nu),
     }
 
-
-@st.cache_data(ttl=3600)  # Cache for 1 hour (backtest doesn't change)
+@st.cache_data(ttl=3600)
 def get_backtest_metrics():
-    """
-    Load and compute backtest metrics from backtest_results.jsonl.
-    """
-    filepath = "backtest_results.jsonl"
-    if not os.path.exists(filepath):
-        return None
-
-    predictions = []
-    with open(filepath, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                predictions.append(json.loads(line))
-
-    if not predictions:
-        return None
-
-    metrics = evaluate_predictions(predictions)
-    metrics["predictions_data"] = predictions
-    return metrics
+    fp = "backtest_results.jsonl"
+    if not os.path.exists(fp): return None
+    preds = [json.loads(l.strip()) for l in open(fp) if l.strip()]
+    if not preds: return None
+    m = evaluate_predictions(preds)
+    m["predictions_data"] = preds
+    return m
 
 
-def _next_bar_close_time() -> str:
-    """Calculate when the next hourly bar closes."""
-    now = datetime.now(timezone.utc)
-    next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    remaining = next_hour - now
-    minutes = int(remaining.total_seconds() // 60)
-    return f"{minutes} min"
+# ── Plotly Helpers ───────────────────────────────────────
+def theme_colors():
+    if is_dark:
+        return dict(bg="#1f2228", grid="rgba(255,255,255,0.04)",
+            text="rgba(255,255,255,0.4)", line="#fff",
+            band="rgba(255,255,255,0.07)", green="#22c55e", red="#ef4444",
+            bar_pos="rgba(255,255,255,0.6)", bar_neg="rgba(255,255,255,0.2)")
+    else:
+        return dict(bg="#fafafa", grid="rgba(0,0,0,0.04)",
+            text="rgba(0,0,0,0.4)", line="#1f2228",
+            band="rgba(0,0,0,0.06)", green="#16a34a", red="#dc2626",
+            bar_pos="rgba(0,0,0,0.6)", bar_neg="rgba(0,0,0,0.15)")
+
+def base_layout(tc, height=380):
+    return dict(
+        paper_bgcolor=tc["bg"], plot_bgcolor=tc["bg"], height=height,
+        margin=dict(l=50, r=20, t=10, b=35),
+        font=dict(family="JetBrains Mono, monospace", size=10, color=tc["text"]),
+        xaxis=dict(gridcolor=tc["grid"], zeroline=False, showline=True,
+            linecolor=tc["grid"], linewidth=1),
+        yaxis=dict(gridcolor=tc["grid"], zeroline=False, showline=True,
+            linecolor=tc["grid"], linewidth=1),
+    )
 
 
-# ── Main App ─────────────────────────────────────────────────────
-
+# ── Main App ─────────────────────────────────────────────
 def main():
-    # ── Header ───────────────────────────────────────────────────
-    st.markdown("""
-    <div class="main-header">
-        <h1>₿ BTC Next-Hour Forecast</h1>
-        <p>AlphaI × Polaris Challenge — GBM + FIGARCH + Student-t Model</p>
+    tc = theme_colors()
+    now_utc = datetime.now(timezone.utc)
+    next_h = now_utc.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    mins_left = int((next_h - now_utc).total_seconds() // 60)
+
+    # ── Nav Bar ──────────────────────────────────────────
+    st.markdown(f"""
+    <div class="nav-bar">
+        <div class="nav-brand">BTC FORECAST</div>
+        <div class="nav-right">
+            <div class="nav-tag"><span class="live-dot"></span> LIVE</div>
+            <div class="nav-tag">NEXT BAR: {mins_left}M</div>
+            <div class="nav-tag">BTCUSDT · 1H · BINANCE</div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Load backtest metrics ────────────────────────────────────
+    st.checkbox(f"{'◐' if is_dark else '◑'} {'DARK' if is_dark else 'LIGHT'} MODE",
+        value=not is_dark, on_change=toggle_theme, key="theme_toggle")
+
+    # ── Load Data ────────────────────────────────────────
     backtest = get_backtest_metrics()
-
-    if backtest:
-        formatted = format_metrics_display(backtest)
-
-        # Headline metrics row
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Coverage (95%)", formatted["coverage"])
-        with col2:
-            st.metric("Avg Width", formatted["avg_width"])
-        with col3:
-            st.metric("Winkler Score", formatted["winkler"])
-        with col4:
-            st.metric("Backtest Bars", formatted["predictions"])
-    else:
-        st.warning(
-            "⚠️ Backtest results not found. "
-            "Run `python backtest.py` to generate `backtest_results.jsonl`."
-        )
-
-    # ── Live Prediction ──────────────────────────────────────────
     try:
-        with st.spinner("🔮 Running GBM model on latest 500 bars..."):
-            prediction = get_live_prediction()
+        with st.spinner(""):
+            d = get_live_data()
+    except Exception as e:
+        st.error(f"Model error: {e}"); return
 
-        current = prediction["current_price"]
-        low = prediction["predicted_low"]
-        high = prediction["predicted_high"]
-        width = high - low
-        regime = prediction["model_info"].get("volatility_regime", "Unknown")
+    current = d["current_price"]
+    low, high = d["predicted_low"], d["predicted_high"]
+    width = high - low
+    info = d["model_info"]
+    regime = info.get("volatility_regime", "").replace("🟢 ", "").replace("🟡 ", "").replace("🔴 ", "")
+    chg_sign = "+" if d["change_24h"] >= 0 else ""
 
-        # Prediction display
+    # ── Hero + 24h Stats ─────────────────────────────────
+    st.markdown(f"""
+    <div class="hero-section">
+        <div class="hero-label">BITCOIN / USDT</div>
+        <div class="hero-price">${current:,.2f}</div>
+        <div class="hero-subtitle">
+            24h: {chg_sign}{d['change_24h']:.2f}% &nbsp;·&nbsp;
+            H: ${d['high_24h']:,.2f} &nbsp;·&nbsp;
+            L: ${d['low_24h']:,.2f} &nbsp;·&nbsp;
+            Vol: {d['avg_vol_24h']:.4f} &nbsp;·&nbsp;
+            {regime}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Metrics Grid ─────────────────────────────────────
+    if backtest:
+        fm = format_metrics_display(backtest)
+        cov_raw = backtest.get("coverage_95", 0)
+        cov_st = "ON TARGET" if 0.93 <= cov_raw <= 0.97 else "REVIEW"
         st.markdown(f"""
-        <div class="prediction-box">
-            <div class="label">Current BTC Price</div>
-            <div class="price">${current:,.2f}</div>
-            <div class="label">Predicted 95% Range for Next Hour</div>
-            <div class="range">${low:,.2f} — ${high:,.2f}</div>
-            <div class="sublabel">Width: ${width:,.2f} | Next bar closes in: {prediction['next_bar_close']}</div>
-            <div class="sublabel">Volatility Regime: {regime}</div>
+        <div class="metrics-grid">
+            <div class="metric-card"><div class="metric-label">COVERAGE</div>
+                <div class="metric-value">{fm['coverage']}</div>
+                <div class="metric-sub">{cov_st} · TARGET 95%</div></div>
+            <div class="metric-card"><div class="metric-label">AVG WIDTH</div>
+                <div class="metric-value">{fm['avg_width']}</div>
+                <div class="metric-sub">PREDICTION RANGE</div></div>
+            <div class="metric-card"><div class="metric-label">WINKLER</div>
+                <div class="metric-value">{fm['winkler']}</div>
+                <div class="metric-sub">LOWER IS BETTER</div></div>
+            <div class="metric-card"><div class="metric-label">PREDICTIONS</div>
+                <div class="metric-value">{fm['predictions']}</div>
+                <div class="metric-sub">{fm['hits']} HITS · {fm['misses']} MISSES</div></div>
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Chart ────────────────────────────────────────────────
-        st.markdown('<div class="section-header">📊 Price Chart — Last 50 Bars with 95% Confidence Ribbon</div>', unsafe_allow_html=True)
-
-        fig = go.Figure()
-
-        dates = prediction["chart_dates"]
-        prices_chart = prediction["chart_prices"]
-        lows_chart = prediction["chart_lows"]
-        highs_chart = prediction["chart_highs"]
-
-        # Upper band (invisible, for fill)
-        fig.add_trace(go.Scatter(
-            x=dates,
-            y=highs_chart,
-            mode='lines',
-            line=dict(width=0),
-            showlegend=False,
-            hoverinfo='skip',
-        ))
-
-        # Lower band (with fill to upper)
-        fig.add_trace(go.Scatter(
-            x=dates,
-            y=lows_chart,
-            mode='lines',
-            line=dict(width=0),
-            fill='tonexty',
-            fillcolor='rgba(247, 147, 26, 0.15)',
-            name='95% Confidence',
-            hoverinfo='skip',
-        ))
-
-        # Price line
-        fig.add_trace(go.Scatter(
-            x=dates,
-            y=prices_chart,
-            mode='lines+markers',
-            line=dict(color='#F7931A', width=2),
-            marker=dict(size=3, color='#F7931A'),
-            name='BTC Price',
-            hovertemplate='%{x}<br>Price: $%{y:,.2f}<extra></extra>',
-        ))
-
-        # Next-bar prediction range (shaded area extending right)
-        if dates:
-            last_date = dates[-1]
-            next_date = last_date + pd.Timedelta(hours=1)
-
-            fig.add_trace(go.Scatter(
-                x=[last_date, next_date, next_date, last_date],
-                y=[current, high, low, current],
-                fill='toself',
-                fillcolor='rgba(0, 255, 136, 0.2)',
-                line=dict(color='rgba(0, 255, 136, 0.5)', width=1),
-                name=f'Next Hour: ${low:,.0f}–${high:,.0f}',
-                hoverinfo='skip',
-            ))
-
-            # Dashed lines for predicted range
-            fig.add_hline(y=high, line_dash="dash", line_color="#00FF88",
-                         annotation_text=f"Upper: ${high:,.2f}",
-                         annotation_position="top right",
-                         annotation_font_color="#00FF88")
-            fig.add_hline(y=low, line_dash="dash", line_color="#00FF88",
-                         annotation_text=f"Lower: ${low:,.2f}",
-                         annotation_position="bottom right",
-                         annotation_font_color="#00FF88")
-
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(14,17,23,1)',
-            height=450,
-            margin=dict(l=50, r=50, t=30, b=50),
-            xaxis=dict(
-                gridcolor='rgba(255,255,255,0.05)',
-                title="Time (UTC)",
-            ),
-            yaxis=dict(
-                gridcolor='rgba(255,255,255,0.05)',
-                title="Price (USDT)",
-                tickformat="$,.0f",
-            ),
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1,
-                font=dict(size=11),
-            ),
-            hovermode="x unified",
-        )
-
-        st.plotly_chart(fig, width='stretch')
-
-        # ── Model Details (collapsible) ──────────────────────────
-        with st.expander("🔧 Model Parameters"):
-            info = prediction["model_info"]
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.markdown(f"**Hourly Drift (μ):** {info.get('hourly_drift', 0):.8f}")
-                st.markdown(f"**Student-t ν:** {info.get('nu_degrees_freedom', 0):.2f}")
-            with col2:
-                st.markdown(f"**Latest σ:** {info.get('latest_sigma', 0):.6f}")
-                st.markdown(f"**Mean σ²:** {info.get('mean_sigma2', 0):.10f}")
-            with col3:
-                st.markdown(f"**Regime:** {info.get('volatility_regime', 'N/A')}")
-                st.markdown(f"**Simulations:** 10,000")
-
-        # ── Part C: Prediction History ───────────────────────────
-        st.markdown('<div class="section-header">📜 Prediction History</div>', unsafe_allow_html=True)
-
-        store = PredictionStore(use_gsheets=False)
-
-        # Save this prediction if enough time has passed
-        if store.should_save_new_prediction():
-            store.save_prediction({
-                "timestamp": prediction["prediction_time"],
-                "current_price": current,
-                "predicted_low_95": low,
-                "predicted_high_95": high,
-            })
-
-        # Display history
-        history_df = store.get_history_dataframe()
-        if len(history_df) > 0:
-            st.dataframe(
-                history_df.style.format({
-                    "current_price": "${:,.2f}",
-                    "predicted_low_95": "${:,.2f}",
-                    "predicted_high_95": "${:,.2f}",
-                    "actual_close": lambda x: f"${x:,.2f}" if pd.notna(x) and x else "⏳",
-                    "winkler": lambda x: f"{x:,.2f}" if pd.notna(x) and x else "—",
-                }),
-                width='stretch',
-                hide_index=True,
-            )
-            st.caption(f"Total predictions stored: {len(history_df)}")
-        else:
-            st.info("No prediction history yet. Each visit generates a new prediction that gets saved here.")
-
-    except Exception as e:
-        st.error(f"❌ Error running model: {str(e)}")
-        st.exception(e)
-
-    # ── Footer ───────────────────────────────────────────────────
-    st.markdown("""
-    <div class="footer">
-        <p>
-            Built for the AlphaI × Polaris Challenge |
-            Model: GBM + FIGARCH(1,0,1) + Student-t |
-            Data: Binance BTCUSDT 1H |
-            Auto-refreshes every 5 minutes
-        </p>
+    # ── Prediction Range ─────────────────────────────────
+    st.markdown(f"""
+    <div class="prediction-card">
+        <div class="pred-left">
+            <div class="pred-range-label">95% CONFIDENCE INTERVAL — NEXT HOUR</div>
+            <div class="pred-range-value">${low:,.2f} &nbsp;—&nbsp; ${high:,.2f}</div>
+        </div>
+        <div class="pred-right">
+            <div class="pred-detail"><div class="pred-detail-label">WIDTH</div>
+                <div class="pred-detail-value">${width:,.2f}</div></div>
+            <div class="pred-detail"><div class="pred-detail-label">DRIFT</div>
+                <div class="pred-detail-value">{info.get('hourly_drift',0):.6f}</div></div>
+            <div class="pred-detail"><div class="pred-detail-label">SIMS</div>
+                <div class="pred-detail-value">10,000</div></div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Auto-refresh ─────────────────────────────────────────────
-    # Refresh the page every 5 minutes for live updates
-    st.markdown(
-        f"""
-        <div class="refresh-indicator">
-            Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
+    # ── Main Chart ───────────────────────────────────────
+    st.markdown("""<div class="chart-section"><div class="chart-header">
+        <div class="chart-title">Price — Last 50 Bars with 95% Confidence Ribbon</div>
+        <div class="chart-tag">FIGARCH(1,0,1) + STUDENT-T</div>
+    </div></div>""", unsafe_allow_html=True)
+
+    dates = d["chart_dates"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=dates, y=d["chart_highs"], mode='lines',
+        line=dict(width=0), showlegend=False, hoverinfo='skip'))
+    fig.add_trace(go.Scatter(x=dates, y=d["chart_lows"], mode='lines',
+        line=dict(width=0), fill='tonexty', fillcolor=tc["band"],
+        name='95% CI', hoverinfo='skip'))
+    fig.add_trace(go.Scatter(x=dates, y=d["chart_prices"], mode='lines',
+        line=dict(color=tc["line"], width=1.5), name='BTC/USDT',
+        hovertemplate='%{x|%b %d %H:%M}<br>$%{y:,.2f}<extra></extra>'))
+    if dates:
+        last = dates[-1]; nxt = last + pd.Timedelta(hours=1)
+        fig.add_trace(go.Scatter(x=[last,nxt,nxt,last], y=[current,high,low,current],
+            fill='toself', fillcolor="rgba(34,197,94,0.12)",
+            line=dict(color=tc["green"], width=1),
+            name=f'Pred: ${low:,.0f}–${high:,.0f}', hoverinfo='skip'))
+        fig.add_hline(y=high, line_dash="dot", line_color=tc["green"], line_width=1,
+            annotation_text=f"${high:,.0f}", annotation_font_color=tc["green"],
+            annotation_font_size=10, annotation_font_family="JetBrains Mono")
+        fig.add_hline(y=low, line_dash="dot", line_color=tc["green"], line_width=1,
+            annotation_text=f"${low:,.0f}", annotation_font_color=tc["green"],
+            annotation_font_size=10, annotation_font_family="JetBrains Mono")
+    layout = base_layout(tc, 400)
+    layout["yaxis"]["tickformat"] = "$,.0f"
+    layout["legend"] = dict(orientation="h", y=1.06, x=0, font=dict(size=9, color=tc["text"]))
+    layout["hovermode"] = "x unified"
+    fig.update_layout(**layout)
+    st.plotly_chart(fig, width='stretch')
+
+    # ═══════════════════════════════════════════════════════
+    # ADDITIONAL ANALYTICS PANELS (3-column grid)
+    # ═══════════════════════════════════════════════════════
+    col1, col2, col3 = st.columns(3)
+
+    # ── Panel 1: Hourly Returns (last 24h bar chart) ─────
+    with col1:
+        st.markdown("""<div class="chart-section"><div class="chart-header">
+            <div class="chart-title">Hourly Returns — Last 24h</div>
+            <div class="chart-tag">LOG RETURNS</div>
+        </div></div>""", unsafe_allow_html=True)
+        rets = d["recent_ret"]
+        colors = [tc["bar_pos"] if r >= 0 else tc["bar_neg"] for r in rets]
+        fig_r = go.Figure(go.Bar(
+            x=d["recent_ret_dates"], y=[r*100 for r in rets],
+            marker_color=colors, hovertemplate='%{x}<br>%{y:.3f}%<extra></extra>'))
+        lr = base_layout(tc, 240)
+        lr["yaxis"]["ticksuffix"] = "%"
+        fig_r.update_layout(**lr)
+        st.plotly_chart(fig_r, width='stretch')
+
+    # ── Panel 2: Volatility Timeline ─────────────────────
+    with col2:
+        st.markdown("""<div class="chart-section"><div class="chart-header">
+            <div class="chart-title">Conditional Volatility σ</div>
+            <div class="chart-tag">FIGARCH</div>
+        </div></div>""", unsafe_allow_html=True)
+        fig_v = go.Figure(go.Scatter(
+            x=d["vol_dates"], y=d["vol_series"], mode='lines',
+            line=dict(color=tc["line"], width=1), fill='tozeroy',
+            fillcolor=tc["band"],
+            hovertemplate='%{x|%b %d %H:%M}<br>σ = %{y:.6f}<extra></extra>'))
+        fig_v.update_layout(**base_layout(tc, 240))
+        st.plotly_chart(fig_v, width='stretch')
+
+    # ── Panel 3: Monte Carlo Distribution ────────────────
+    with col3:
+        st.markdown("""<div class="chart-section"><div class="chart-header">
+            <div class="chart-title">Simulated Next-Hour Prices</div>
+            <div class="chart-tag">MC DISTRIBUTION</div>
+        </div></div>""", unsafe_allow_html=True)
+        sims = d["sims_terminal"]
+        fig_h = go.Figure(go.Histogram(
+            x=sims, nbinsx=60, marker_color=tc["bar_pos"],
+            marker_line_width=0, opacity=0.8,
+            hovertemplate='$%{x:,.0f}<br>Count: %{y}<extra></extra>'))
+        fig_h.add_vline(x=current, line_dash="solid", line_color=tc["green"], line_width=1,
+            annotation_text="Current", annotation_font_color=tc["green"],
+            annotation_font_size=9, annotation_font_family="JetBrains Mono")
+        hl = base_layout(tc, 240)
+        hl["xaxis"]["tickformat"] = "$,.0f"
+        fig_h.update_layout(**hl)
+        st.plotly_chart(fig_h, width='stretch')
+
+    # ═══════════════════════════════════════════════════════
+    # MARKET STATS + MODEL PARAMS + HISTORY (3-panel bottom)
+    # ═══════════════════════════════════════════════════════
+    def stat_row(k, v):
+        return f'<div class="param-row"><span class="param-key">{k}</span><span class="param-val">{v}</span></div>'
+
+    # Market stats card (HTML)
+    stats_html = f"""
+    <div class="stats-grid" style="display:grid;grid-template-columns:1fr 1fr 1.5fr;gap:1px;
+        border:1px solid {'rgba(255,255,255,0.1)' if is_dark else 'rgba(0,0,0,0.1)'};
+        margin-bottom:48px;animation:fadeInUp 0.7s ease-out 0.5s both;">
+        <div class="bottom-panel">
+            <div class="panel-title">MARKET STATISTICS</div>
+            {stat_row("24h Change", f'{chg_sign}{d["change_24h"]:.2f}%')}
+            {stat_row("24h High", f'${d["high_24h"]:,.2f}')}
+            {stat_row("24h Low", f'${d["low_24h"]:,.2f}')}
+            {stat_row("24h Volatility", f'{d["avg_vol_24h"]:.6f}')}
+            {stat_row("7d Change", f'{"+" if d["change_7d"]>=0 else ""}{d["change_7d"]:.2f}%')}
+            {stat_row("7d High", f'${d["high_7d"]:,.2f}')}
+            {stat_row("7d Low", f'${d["low_7d"]:,.2f}')}
+            {stat_row("7d Volatility", f'{d["avg_vol_7d"]:.6f}')}
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        <div class="bottom-panel">
+            <div class="panel-title">MODEL PARAMETERS</div>
+            {stat_row("Hourly Drift (μ)", f'{info.get("hourly_drift",0):.8f}')}
+            {stat_row("Student-t ν", f'{d["nu"]:.2f}')}
+            {stat_row("Latest σ", f'{info.get("latest_sigma",0):.6f}')}
+            {stat_row("Mean σ²", f'{info.get("mean_sigma2",0):.10f}')}
+            {stat_row("Regime", regime.upper())}
+            {stat_row("Simulations", "10,000")}
+            {stat_row("Train Window", "500 BARS")}
+            {stat_row("Time Step (dt)", "1.0 (HOURLY)")}
+        </div>
+        <div class="bottom-panel">
+            <div class="panel-title">PREDICTION HISTORY</div>
+        </div>
+    </div>"""
+    st.markdown(stats_html, unsafe_allow_html=True)
+
+    # History table
+    store = PredictionStore(use_gsheets=False)
+    if store.should_save_new_prediction():
+        store.save_prediction({
+            "timestamp": d["prediction_time"], "current_price": current,
+            "predicted_low_95": low, "predicted_high_95": high,
+        })
+    hdf = store.get_history_dataframe()
+    if len(hdf) > 0:
+        st.dataframe(hdf, width='stretch', hide_index=True)
+    else:
+        st.markdown(f"""<p style="font-family:Inter,sans-serif;font-size:13px;
+            color:{'rgba(255,255,255,0.3)' if is_dark else 'rgba(0,0,0,0.3)'};
+            padding:8px 0;">No predictions stored yet. Each visit saves a new entry.</p>""",
+            unsafe_allow_html=True)
+
+    # ── Footer ───────────────────────────────────────────
+    st.markdown(f"""
+    <div class="site-footer">
+        <div class="footer-text">AlphaI × Polaris Challenge &nbsp;·&nbsp;
+            GBM + FIGARCH(1,0,1) + Student-t &nbsp;·&nbsp; Binance BTCUSDT 1H</div>
+        <div class="footer-mono">{now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}</div>
+    </div>""", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
