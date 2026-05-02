@@ -149,11 +149,16 @@ def run_backtest(
                 ),
                 "model_error": str(e),
             })
-            if len(predictions) % 10 == 0 or len(predictions) == total_iters:
-                elapsed = time.time() - t_start
-                rate = elapsed / len(predictions) if predictions else 0
-                cov = running_hits / len(predictions) if predictions else 0
-                print(f"  [{len(predictions):>4}/{total_iters}]  coverage: {cov:.1%}  |  {rate:.1f}s/bar", flush=True)
+            elapsed = time.time() - t_start
+            rate = elapsed / len(predictions) if predictions else 0
+            cov = running_hits / len(predictions) if predictions else 0
+            bar_len = 30
+            filled = int(round(bar_len * len(predictions) / float(total_iters)))
+            bar = '█' * filled + '░' * (bar_len - filled)
+            pct = round(100.0 * len(predictions) / float(total_iters), 1)
+            sys.stdout.write(f"\r  [{bar}] {pct}% | {len(predictions):>3}/{total_iters} | cov: {cov:.1%} | {rate:.1f}s/bar")
+            sys.stdout.flush()
+            if len(predictions) == total_iters: print()
             continue
 
         # Predict next bar
@@ -183,11 +188,16 @@ def run_backtest(
                 ),
                 "model_error": str(e),
             })
-            if len(predictions) % 10 == 0 or len(predictions) == total_iters:
-                elapsed = time.time() - t_start
-                rate = elapsed / len(predictions) if predictions else 0
-                cov = running_hits / len(predictions) if predictions else 0
-                print(f"  [{len(predictions):>4}/{total_iters}]  coverage: {cov:.1%}  |  {rate:.1f}s/bar", flush=True)
+            elapsed = time.time() - t_start
+            rate = elapsed / len(predictions) if predictions else 0
+            cov = running_hits / len(predictions) if predictions else 0
+            bar_len = 30
+            filled = int(round(bar_len * len(predictions) / float(total_iters)))
+            bar = '█' * filled + '░' * (bar_len - filled)
+            pct = round(100.0 * len(predictions) / float(total_iters), 1)
+            sys.stdout.write(f"\r  [{bar}] {pct}% | {len(predictions):>3}/{total_iters} | cov: {cov:.1%} | {rate:.1f}s/bar")
+            sys.stdout.flush()
+            if len(predictions) == total_iters: print()
             continue
 
         actual = float(prices.iloc[i])
@@ -208,11 +218,16 @@ def run_backtest(
         })
 
         # Update progress bar with live coverage
-        if len(predictions) % 10 == 0 or len(predictions) == total_iters:
-            elapsed = time.time() - t_start
-            rate = elapsed / len(predictions) if predictions else 0
-            cov = running_hits / len(predictions) if predictions else 0
-            print(f"  [{len(predictions):>4}/{total_iters}]  coverage: {cov:.1%}  |  {rate:.1f}s/bar", flush=True)
+        elapsed = time.time() - t_start
+        rate = elapsed / len(predictions) if predictions else 0
+        cov = running_hits / len(predictions) if predictions else 0
+        bar_len = 30
+        filled = int(round(bar_len * len(predictions) / float(total_iters)))
+        bar = '█' * filled + '░' * (bar_len - filled)
+        pct = round(100.0 * len(predictions) / float(total_iters), 1)
+        sys.stdout.write(f"\r  [{bar}] {pct}% | {len(predictions):>3}/{total_iters} | cov: {cov:.1%} | {rate:.1f}s/bar")
+        sys.stdout.flush()
+        if len(predictions) == total_iters: print()
 
     # ── Save results ─────────────────────────────────────────────
     print(f"\n💾 Saving {len(predictions)} predictions to {output_file}...")
