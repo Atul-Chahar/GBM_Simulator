@@ -383,7 +383,7 @@ def main():
     st.markdown(stats_html, unsafe_allow_html=True)
 
     # History table
-    store = PredictionStore(use_gsheets=False)
+    store = PredictionStore(use_gsheets=True, sheet_url="https://docs.google.com/spreadsheets/d/1nnQH3URcdwTImRJo54TawKC23MD6fcLOnKucVTgHOtk/edit?gid=0#gid=0")
     
     # Verify past predictions using the last 50 closed bars
     price_map = {dt.isoformat(): p for dt, p in zip(d["chart_dates"], d["chart_prices"])}
