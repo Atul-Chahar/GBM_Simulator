@@ -486,6 +486,9 @@ def main():
             </div>""", unsafe_allow_html=True)
 
     # Market stats card (HTML)
+    def stat_row(k, v):
+        return f'<div class="param-row"><span class="param-key">{k}</span><span class="param-val">{v}</span></div>'
+
     stats_html = f"""
     <div class="stats-grid" style="display:grid;grid-template-columns:1fr 1fr 1.5fr;gap:1px;
         border:1px solid {'rgba(255,255,255,0.1)' if is_dark else 'rgba(0,0,0,0.1)'};
