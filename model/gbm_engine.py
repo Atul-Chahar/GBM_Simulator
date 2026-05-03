@@ -174,7 +174,9 @@ class GBMEngine:
         resid = (log_ret.loc[cond_vol.index] * 100 - best_res.params["mu"]) / cond_vol
 
         try:
-            self.nu = max(4, stats.t.fit(resid.dropna(), floc=0, fscale=1)[0])
+            # Extract fitted degrees of freedom directly from the ARCH model
+            # This avoids scipy.stats.t.fit hanging infinitely on constrained CPUs
+            self.nu = max(4.0, float(best_res.params.get("nu", 5.0)))
         except Exception:
             self.nu = 5.0
 
