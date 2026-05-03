@@ -73,7 +73,7 @@ st.markdown("""<style>
 
 # ── Cached Data Functions ────────────────────────────────
 @st.cache_data(ttl=300)
-def get_live_data():
+def get_live_data_v2():
     df = fetch_latest_bars(num_bars=500)
     prices = get_close_prices(df)
     engine = GBMEngine(n_sims=10_000, random_seed=42)
@@ -190,7 +190,7 @@ def main():
     backtest = get_backtest_metrics()
     try:
         with st.spinner("Fetching live BTCUSDT data from Binance..."):
-            d = get_live_data()
+            d = get_live_data_v2()
     except Exception as e:
         st.warning("⚠️ Live data unavailable. Showing cached metrics only.")
         if backtest:
