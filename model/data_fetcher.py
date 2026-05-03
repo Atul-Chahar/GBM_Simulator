@@ -31,34 +31,39 @@ from datetime import datetime, timedelta, timezone
 # Primary endpoint (no geo-block). Fallback to api.binance.com if needed.
 PRIMARY_URL = "https://data-api.binance.vision/api/v3/klines"
 FALLBACK_URL = "https://api.binance.com/api/v3/klines"
-TIME_URL = "https://data-api.binance.vision/api/v3/time"
+TIME_URL_PRIMARY = "https://api.binance.com/api/v3/time"
+TIME_URL_FALLBACK = "https://data-api.binance.vision/api/v3/time"
 
-# One hour in milliseconds
 ONE_HOUR_MS = 3_600_000
 
-# Cached Binance time offset (ms)
 _binance_time_offset_ms = 0.0
+_binance_time_last_check = 0.0
+TIME_CACHE_TTL = 300  # 5 minutes
 
 
 def _check_binance_time() -> float:
-    """
-    Compare Binance server time to local UTC time.
-    Returns offset in milliseconds (server_time - local_time).
-    Caches result for 5 minutes.
-    """
-    global _binance_time_offset_ms
-    try:
-        resp = requests.get(TIME_URL, timeout=5)
-        if resp.status_code == 200:
-            server_time_ms = resp.json()["serverTime"]
-            local_time_ms = int(time.time() * 1000)
-            offset = server_time_ms - local_time_ms
-            _binance_time_offset_ms = offset
-            if abs(offset) > 30_000:
-                print(f"⚠️ Binance clock drift: {offset/1000:.0f}s offset from local UTC")
-            return offset
-    except Exception:
-        pass
+    global _binance_time_offset_ms, _binance_time_last_check
+    now = time.time()
+    if now - _binance_time_last_check < TIME_CACHE_TTL:
+        return _binance_time_offset_ms
+
+    time_urls = [TIME_URL_PRIMARY, TIME_URL_FALLBACK]
+    for url in time_urls:
+        try:
+            resp = requests.get(url, timeout=3)
+            if resp.status_code == 200:
+                server_time_ms = resp.json()["serverTime"]
+                local_time_ms = int(time.time() * 1000)
+                offset = server_time_ms - local_time_ms
+                _binance_time_offset_ms = offset
+                _binance_time_last_check = now
+                if abs(offset) > 30_000:
+                    print(f"⚠️ Binance clock drift: {offset/1000:.0f}s offset from local UTC")
+                return offset
+        except Exception:
+            continue
+
+    _binance_time_last_check = now
     return _binance_time_offset_ms
 
 
@@ -186,7 +191,7 @@ def _request_with_fallback(params: dict) -> list:
     """
     for url in [PRIMARY_URL, FALLBACK_URL]:
         try:
-            response = requests.get(url, params=params, timeout=15)
+            response = requests.get(url, params=params, timeout=10)
             if response.status_code == 200:
                 return response.json()
         except requests.RequestException:
