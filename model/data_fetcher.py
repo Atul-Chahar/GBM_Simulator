@@ -1,6 +1,6 @@
 """
 data_fetcher.py — Binance API Data Pipeline
-=============================================
+============================================
 Fetches BTCUSDT 1-hour kline (candlestick) data from Binance's
 public API. Uses data-api.binance.vision to avoid geo-blocking
 in India (as specified in the challenge brief).
@@ -27,8 +27,8 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
+import streamlit as st
 
-# Primary endpoint (no geo-block). Fallback to api.binance.com if needed.
 PRIMARY_URL = "https://data-api.binance.vision/api/v3/klines"
 FALLBACK_URL = "https://api.binance.com/api/v3/klines"
 TIME_URL_PRIMARY = "https://api.binance.com/api/v3/time"
@@ -38,9 +38,10 @@ ONE_HOUR_MS = 3_600_000
 
 _binance_time_offset_ms = 0.0
 _binance_time_last_check = 0.0
-TIME_CACHE_TTL = 300  # 5 minutes
+TIME_CACHE_TTL = 300
 
 
+@st.cache_data(ttl=TIME_CACHE_TTL)
 def _check_binance_time() -> float:
     global _binance_time_offset_ms, _binance_time_last_check
     now = time.time()
@@ -76,26 +77,6 @@ def fetch_btc_klines(
 ) -> pd.DataFrame:
     """
     Fetch BTCUSDT hourly klines from Binance.
-
-    Parameters
-    ----------
-    num_bars : int
-        Total number of bars to fetch. Handles pagination automatically
-        for requests > 1000 bars.
-    end_time : int, optional
-        End timestamp in milliseconds. Defaults to current time.
-    interval : str
-        Kline interval. Default "1h".
-    symbol : str
-        Trading pair. Default "BTCUSDT".
-    closed_only : bool
-        If True, drop the last bar if it hasn't closed yet (close_time > now).
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with columns: close_time, open, high, low, close, volume
-        Indexed by open_time (datetime).
     """
     all_klines = []
     remaining = num_bars
@@ -106,7 +87,6 @@ def fetch_btc_klines(
     while remaining > 0:
         batch_size = min(remaining, 1000)
 
-        # Calculate start_time for this batch
         start_time = end_time - (batch_size * ONE_HOUR_MS)
 
         params = {
@@ -122,14 +102,13 @@ def fetch_btc_klines(
         if not data:
             break
 
-        all_klines = data + all_klines  # Prepend (older data first)
+        all_klines = data + all_klines
         remaining -= len(data)
 
-        # Move end_time back for next batch
-        end_time = data[0][0] - 1  # 1ms before oldest bar in this batch
+        end_time = data[0][0] - 1
 
-        # Respect rate limits
-        time.sleep(0.1)
+        if remaining > 0:
+            time.sleep(0.1)
 
         if len(data) < batch_size:
             break
@@ -150,37 +129,14 @@ def fetch_btc_klines(
 def fetch_latest_bars(num_bars: int = 500) -> pd.DataFrame:
     """
     Fetch the most recent N closed 1-hour bars.
-    Excludes the currently-forming (unclosed) bar via close_time check.
-
-    Parameters
-    ----------
-    num_bars : int
-        Number of closed bars to fetch.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame of closed bars.
     """
-    # Fetch with closed_only=True; request 1 extra to account for potential drop
     df = fetch_btc_klines(num_bars=num_bars + 1, closed_only=True)
-
     return df.tail(num_bars)
 
 
 def get_close_prices(df: pd.DataFrame) -> pd.Series:
     """
     Extract close prices as a pandas Series indexed by datetime.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame from fetch_btc_klines or fetch_latest_bars.
-
-    Returns
-    -------
-    pd.Series
-        Close prices indexed by open_time.
     """
     return df["close"].copy()
 
@@ -221,24 +177,20 @@ def _klines_to_dataframe(klines: list) -> pd.DataFrame:
         ],
     )
 
-    # Convert types
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
 
-    # Keep essential columns including close_time for unclosed bar detection
     df = df[["open_time", "close_time", "open", "high", "low", "close", "volume"]].copy()
     df.set_index("open_time", inplace=True)
     df.sort_index(inplace=True)
 
-    # Remove duplicates (can happen with overlapping pagination)
     df = df[~df.index.duplicated(keep="last")]
 
     return df
 
 
-# ─── Quick self-test ─────────────────────────────────────────────
 if __name__ == "__main__":
     print("Fetching latest 10 BTCUSDT 1h bars...")
     df = fetch_latest_bars(num_bars=10)

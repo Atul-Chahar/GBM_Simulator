@@ -119,51 +119,44 @@ class GBMEngine:
         return self
 
     def _fit_volatility_model(self, log_ret: pd.Series) -> None:
-        orders = [
-            (1, 0, 1),
-            (1, 0, 2),
-            (1, 1, 1),
-        ]
-
-        best_aic = None
         best_res = None
         best_model_type = "GARCH"
         best_order = None
 
-        for p, o, q in orders:
+        try:
+            am = arch_model(
+                log_ret * 100,
+                vol="FIGARCH",
+                p=1, o=1, q=1,
+                dist="studentst",
+            )
+            best_res = am.fit(disp="off", show_warning=False, options={"maxiter": 100})
+            best_model_type = "FIGARCH"
+            best_order = "FIGARCH(1,1,1)"
+        except Exception:
+            pass
+
+        if best_res is None:
             try:
                 am = arch_model(
                     log_ret * 100,
-                    vol="FIGARCH",
-                    p=p, o=o, q=q,
+                    vol="GARCH",
+                    p=1, o=0, q=1,
                     dist="studentst",
                 )
-                res = am.fit(disp="off", show_warning=False, options={"maxiter": 200})
-                if best_aic is None or res.aic < best_aic:
-                    best_aic = res.aic
-                    best_res = res
-                    best_model_type = "FIGARCH"
-                    best_order = f"FIGARCH({p},{o},{q})"
+                best_res = am.fit(disp="off", show_warning=False, options={"maxiter": 100})
+                best_model_type = "GARCH"
+                best_order = "GARCH(1,1)"
             except Exception:
-                pass
-
-        if best_res is None:
-            for p, o, q in [(1, 0, 1), (1, 0, 2), (2, 0, 2)]:
-                try:
-                    am = arch_model(
-                        log_ret * 100,
-                        vol="GARCH",
-                        p=p, o=o, q=q,
-                        dist="studentst",
-                    )
-                    res = am.fit(disp="off", show_warning=False, options={"maxiter": 200})
-                    if best_aic is None or res.aic < best_aic:
-                        best_aic = res.aic
-                        best_res = res
-                        best_model_type = "GARCH"
-                        best_order = f"GARCH({p},{o},{q})"
-                except Exception:
-                    pass
+                am = arch_model(
+                    log_ret * 100,
+                    vol="GARCH",
+                    p=1, o=0, q=1,
+                    dist="normal",
+                )
+                best_res = am.fit(disp="off", show_warning=False, options={"maxiter": 100})
+                best_model_type = "GARCH"
+                best_order = "GARCH(1,1)"
 
         self._model_type = best_model_type
         self._selected_order = best_order

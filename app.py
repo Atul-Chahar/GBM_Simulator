@@ -76,7 +76,7 @@ st.markdown("""<style>
 def get_live_data_v2():
     df = fetch_latest_bars(num_bars=500)
     prices = get_close_prices(df)
-    engine = GBMEngine(n_sims=10_000, random_seed=42)
+    engine = GBMEngine(n_sims=5_000, random_seed=42)
     engine.fit(prices)
     low, high, sims, mean_p = engine.predict_interval(confidence=0.95)
     info = engine.get_model_info()
@@ -145,7 +145,7 @@ def theme_colors():
     if is_dark:
         return dict(bg="#1f2228", grid="rgba(255,255,255,0.04)",
             text="rgba(255,255,255,0.4)", line="#fff",
-            band="rgba(255,255,255,0.07)", green="#22c55e", red="#ef4444",
+            band="rgba(255,255,255,0.15)", green="#22c55e", red="#ef4444",
             bar_pos="rgba(255,255,255,0.6)", bar_neg="rgba(255,255,255,0.2)")
     else:
         return dict(bg="#fafafa", grid="rgba(0,0,0,0.04)",
@@ -531,11 +531,12 @@ def main():
     
     # Verify past predictions using the last 50 closed bars
     price_map = {dt.isoformat(): p for dt, p in zip(d["chart_dates"], d["chart_prices"])}
-    store.verify_predictions(price_map)
+    verified_count = store.verify_predictions(price_map)
+    st.info(f"Verified {verified_count} predictions")
 
     if store.should_save_new_prediction():
         store.save_prediction({
-            "timestamp": d["prediction_time"], "current_price": current,
+            "timestamp": d["chart_dates"][-1].isoformat(), "current_price": current,
             "predicted_low_95": low, "predicted_high_95": high,
         })
     hdf = store.get_history_dataframe()
