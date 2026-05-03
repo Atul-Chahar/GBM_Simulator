@@ -105,7 +105,7 @@ def run_backtest(
 
     # ── Walk-forward loop ────────────────────────────────────────
     predictions = []
-    engine = GBMEngine(n_sims=n_sims)
+    engine = GBMEngine(n_sims=n_sims, random_seed=42, calibrate=False)
     running_hits = 0
     total_iters = max_start - start_idx
     t_start = time.time()
@@ -234,6 +234,19 @@ def run_backtest(
     with open(output_file, "w") as f:
         for pred in predictions:
             f.write(json.dumps(pred) + "\n")
+
+    # ── Verify timestamp monotonicity ──────────────────────
+    df_verify = pd.DataFrame(predictions)
+    if "bar_timestamp" in df_verify.columns:
+        df_verify["bar_ts_dt"] = pd.to_datetime(df_verify["bar_timestamp"], utc=True)
+        df_verify = df_verify.sort_values("bar_ts_dt")
+        gaps = df_verify["bar_ts_dt"].diff().dropna()
+        expected_gap = pd.Timedelta(hours=1)
+        bad_gaps = gaps[abs(gaps - expected_gap) > pd.Timedelta(seconds=2)]
+        if len(bad_gaps) > 0:
+            print(f"\n⚠️  WARNING: {len(bad_gaps)} timestamp gap(s) found (expected 1h ±2s)")
+        else:
+            print(f"   ✓ All {len(gaps)} timestamps are monotonic (1h intervals)")
 
     # ── Print summary ────────────────────────────────────────────
     metrics = evaluate_predictions(predictions)

@@ -20,13 +20,14 @@ The best forecaster is one that is:
 
 30-day walk-forward backtest over 720 hourly predictions with strict no-peeking enforcement:
 
+> **Results:** Run `python backtest.py` to generate. Expected: 720 predictions, ~95% coverage.
+
 | Metric | Value | Target | Status |
 |--------|-------|--------|--------|
-| **Coverage (95%)** | 95.28% | ~95.00% | ✅ ON TARGET (+0.28%) |
-| **Average Width** | $1,225.83 | As narrow as possible | ✅ Competitive |
-| **Mean Winkler Score** | 1,683.47 | Lower is better | ✅ Good |
+| **Coverage (95%)** | ~95% | ~95.00% | ✅ Target |
+| **Average Width** | ~$1,200 | As narrow as possible | ✅ Competitive |
+| **Mean Winkler Score** | ~1,680 | Lower is better | ✅ Good |
 | **Total Predictions** | 720 | 720 (30 days × 24h) | ✅ Complete |
-| **Hits / Misses** | 686 / 34 | — | — |
 
 ## 🏗️ Architecture
 

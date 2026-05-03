@@ -26,14 +26,40 @@ import time
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Primary endpoint (no geo-block). Fallback to api.binance.com if needed.
 PRIMARY_URL = "https://data-api.binance.vision/api/v3/klines"
 FALLBACK_URL = "https://api.binance.com/api/v3/klines"
+TIME_URL = "https://data-api.binance.vision/api/v3/time"
 
 # One hour in milliseconds
 ONE_HOUR_MS = 3_600_000
+
+# Cached Binance time offset (ms)
+_binance_time_offset_ms = 0.0
+
+
+def _check_binance_time() -> float:
+    """
+    Compare Binance server time to local UTC time.
+    Returns offset in milliseconds (server_time - local_time).
+    Caches result for 5 minutes.
+    """
+    global _binance_time_offset_ms
+    try:
+        resp = requests.get(TIME_URL, timeout=5)
+        if resp.status_code == 200:
+            server_time_ms = resp.json()["serverTime"]
+            local_time_ms = int(time.time() * 1000)
+            offset = server_time_ms - local_time_ms
+            _binance_time_offset_ms = offset
+            if abs(offset) > 30_000:
+                print(f"⚠️ Binance clock drift: {offset/1000:.0f}s offset from local UTC")
+            return offset
+    except Exception:
+        pass
+    return _binance_time_offset_ms
 
 
 def fetch_btc_klines(
@@ -41,6 +67,7 @@ def fetch_btc_klines(
     end_time: int = None,
     interval: str = "1h",
     symbol: str = "BTCUSDT",
+    closed_only: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch BTCUSDT hourly klines from Binance.
@@ -56,11 +83,13 @@ def fetch_btc_klines(
         Kline interval. Default "1h".
     symbol : str
         Trading pair. Default "BTCUSDT".
+    closed_only : bool
+        If True, drop the last bar if it hasn't closed yet (close_time > now).
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: open_time, open, high, low, close, volume
+        DataFrame with columns: close_time, open, high, low, close, volume
         Indexed by open_time (datetime).
     """
     all_klines = []
@@ -100,13 +129,23 @@ def fetch_btc_klines(
         if len(data) < batch_size:
             break
 
-    return _klines_to_dataframe(all_klines)
+    df = _klines_to_dataframe(all_klines)
+
+    if closed_only and len(df) > 0:
+        offset_ms = _check_binance_time()
+        now = datetime.now(timezone.utc)
+        last_close = df["close_time"].iloc[-1]
+        adjusted_now = now + timedelta(milliseconds=int(offset_ms))
+        if last_close > adjusted_now:
+            df = df.iloc[:-1]
+
+    return df
 
 
 def fetch_latest_bars(num_bars: int = 500) -> pd.DataFrame:
     """
     Fetch the most recent N closed 1-hour bars.
-    Excludes the currently-forming (unclosed) bar.
+    Excludes the currently-forming (unclosed) bar via close_time check.
 
     Parameters
     ----------
@@ -118,21 +157,8 @@ def fetch_latest_bars(num_bars: int = 500) -> pd.DataFrame:
     pd.DataFrame
         DataFrame of closed bars.
     """
-    # Fetch one extra bar, then drop the last one (currently forming)
-    df = fetch_btc_klines(num_bars=num_bars + 1)
-
-    if len(df) <= 1:
-        return df
-
-    # The last row may be the currently-forming candle.
-    # Check if its close_time is in the future.
-    now_ms = int(time.time() * 1000)
-
-    # Each bar's close_time marks when the bar closes.
-    # If the last bar hasn't closed yet, drop it.
-    if len(df) > 0:
-        # Drop the last bar to ensure we only have closed bars
-        df = df.iloc[:-1]
+    # Fetch with closed_only=True; request 1 extra to account for potential drop
+    df = fetch_btc_klines(num_bars=num_bars + 1, closed_only=True)
 
     return df.tail(num_bars)
 
@@ -178,8 +204,8 @@ def _klines_to_dataframe(klines: list) -> pd.DataFrame:
     """
     if not klines:
         return pd.DataFrame(
-            columns=["open_time", "open", "high", "low", "close", "volume"]
-        )
+            columns=["open_time", "close_time", "open", "high", "low", "close", "volume"]
+        ).set_index("open_time")
 
     df = pd.DataFrame(
         klines,
@@ -192,11 +218,12 @@ def _klines_to_dataframe(klines: list) -> pd.DataFrame:
 
     # Convert types
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
 
-    # Keep only essential columns
-    df = df[["open_time", "open", "high", "low", "close", "volume"]].copy()
+    # Keep essential columns including close_time for unclosed bar detection
+    df = df[["open_time", "close_time", "open", "high", "low", "close", "volume"]].copy()
     df.set_index("open_time", inplace=True)
     df.sort_index(inplace=True)
 

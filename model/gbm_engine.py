@@ -1,6 +1,6 @@
 """
 gbm_engine.py — Geometric Brownian Motion Simulation Engine
-=============================================================
+============================================================
 Adapted from the AlphaI × Polaris starter notebook.
 
 Core model: GBM with FIGARCH(1,0,1) conditional volatility,
@@ -27,7 +27,6 @@ import scipy.stats as stats
 from arch import arch_model
 import warnings
 
-# Suppress convergence warnings from arch library during batch fitting
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 
@@ -41,23 +40,11 @@ class GBMEngine:
         low, high = engine.predict_interval(confidence=0.95)
     """
 
-    # Time step: 1 period = 1 hour.
-    # FIGARCH is fitted on hourly log returns, so σ is already per-hour.
-    # dt=1 means "one period" — NOT "one day".
     DT = 1.0
-
-    # Number of Monte Carlo simulations
     N_SIMS = 10_000
-
-    # Entropy rolling window
     ENTROPY_WINDOW = 60
-
-    # Momentum rolling window
     MOMENTUM_WINDOW = 60
 
-    # Base adaptive parameters — tuned down from starter notebook.
-    # Original (forex daily): alpha=0.5, delta=0.3 caused too-wide intervals
-    # on hourly BTC since FIGARCH already captures volatility clustering.
     BASE_PARAMS = {
         "alpha": 0.15,
         "delta": 0.10,
@@ -66,21 +53,14 @@ class GBMEngine:
         "eta": 1e-3,
     }
 
-    def __init__(self, n_sims: int = None, entropy_window: int = None):
-        """
-        Initialize the GBM engine.
-
-        Parameters
-        ----------
-        n_sims : int, optional
-            Number of Monte Carlo paths. Default 10,000.
-        entropy_window : int, optional
-            Window for rolling entropy computation. Default 60.
-        """
+    def __init__(self, n_sims: int = None, entropy_window: int = None, random_seed: int = 42,
+                 calibrate: bool = True):
         self.n_sims = n_sims or self.N_SIMS
         self.entropy_window = entropy_window or self.ENTROPY_WINDOW
+        self.random_seed = random_seed
+        self.rng = np.random.RandomState(random_seed)
+        self._calibrate = calibrate
 
-        # Fitted state (populated by .fit())
         self._fitted = False
         self.mu = None
         self.S0 = None
@@ -92,92 +72,36 @@ class GBMEngine:
         self.redundancy = None
         self.info_filter = None
         self.params = None
+        self._model_type = "GARCH"
+        self._cal_factor = 0.85
+        self._selected_order = None
 
     def fit(self, close_prices: pd.Series) -> "GBMEngine":
-        """
-        Fit the GBM model on historical close prices.
-
-        This estimates:
-        - Drift (mu) from log returns
-        - FIGARCH conditional volatility
-        - Student-t degrees of freedom (nu)
-        - Entropy and momentum indicators
-        - Adaptive crisis parameters
-
-        Parameters
-        ----------
-        close_prices : pd.Series
-            Historical close prices. Index should be datetime-like.
-
-        Returns
-        -------
-        self
-            For method chaining.
-        """
         prices = close_prices.copy()
 
-        # ── Log returns ──────────────────────────────────────────
         log_ret = np.log(prices / prices.shift(1)).dropna()
         self.mu = log_ret.mean()
         self.S0 = prices.iloc[-1]
 
-        # ── FIGARCH(1,0,1) with Student-t innovations ───────────
-        # Scale to percentage returns for numerical stability
-        try:
-            am = arch_model(
-                log_ret * 100,
-                vol="FIGARCH",
-                p=1, o=0, q=1,
-                dist="studentst",
-            )
-            res = am.fit(disp="off", show_warning=False)
-        except Exception:
-            # Fallback to standard GARCH if FIGARCH fails to converge
-            am = arch_model(
-                log_ret * 100,
-                vol="GARCH",
-                p=1, o=0, q=1,
-                dist="studentst",
-            )
-            res = am.fit(disp="off", show_warning=False)
+        self._fit_volatility_model(log_ret)
 
-        # Conditional volatility (rescale back from percentage)
-        self.sigma_fig = res.conditional_volatility / 100
-
-        # Standardized residuals
-        cond_vol = res.conditional_volatility
-        cond_vol = cond_vol.replace(0, np.nan).dropna()
-        resid = (log_ret.loc[cond_vol.index] * 100 - res.params["mu"]) / cond_vol
-
-        # Fit Student-t degrees of freedom (min 4 for finite kurtosis)
-        try:
-            self.nu = max(4, stats.t.fit(resid.dropna(), floc=0, fscale=1)[0])
-        except Exception:
-            self.nu = 5.0  # Safe default
-
-        # ── Rolling entropy (information measure) ────────────────
         self.H_series = self._rolling_entropy(
-            resid, window=self.entropy_window
+            self._get_residuals(log_ret), window=self.entropy_window
         )
-
-        # ── Rolling momentum (absolute return magnitude) ─────────
         self.M_series = log_ret.abs().rolling(self.MOMENTUM_WINDOW).mean()
 
-        # ── Variance components ──────────────────────────────────
         sigma_sq = self.sigma_fig ** 2
         self.bar_sigma2 = sigma_sq.mean()
 
-        # Redundancy factor: short vs long variance ratio
         price_var_5 = prices.rolling(5).var()
         price_var_20 = prices.rolling(20).var()
         ratio = price_var_5 / price_var_20.replace(0, np.nan)
-        self.redundancy = 1 + 0.02 * np.log1p(ratio.fillna(0))
+        ratio = ratio.replace([np.inf, -np.inf], np.nan).fillna(0)
+        self.redundancy = 1 + 0.02 * np.log1p(ratio)
 
-        # Information filter: above-average entropy flag
         H_mean = self.H_series.mean()
         self.info_filter = (self.H_series > H_mean).astype(float)
 
-        # ── Adaptive parameters (scale to avoid explosion) ───────
         self.params = self.BASE_PARAMS.copy()
         H_max = max(self.H_series.max(), 1e-10)
         M_max = max(self.M_series.max(), 1e-10)
@@ -189,34 +113,142 @@ class GBMEngine:
             self.params["alpha"] *= fac
             self.params["delta"] *= fac
 
+        self._calibrate_factor(prices, log_ret)
+
         self._fitted = True
         return self
+
+    def _fit_volatility_model(self, log_ret: pd.Series) -> None:
+        orders = [
+            (1, 0, 1),
+            (1, 0, 2),
+            (1, 1, 1),
+        ]
+
+        best_aic = None
+        best_res = None
+        best_model_type = "GARCH"
+        best_order = None
+
+        for p, o, q in orders:
+            try:
+                am = arch_model(
+                    log_ret * 100,
+                    vol="FIGARCH",
+                    p=p, o=o, q=q,
+                    dist="studentst",
+                )
+                res = am.fit(disp="off", show_warning=False)
+                if best_aic is None or res.aic < best_aic:
+                    best_aic = res.aic
+                    best_res = res
+                    best_model_type = "FIGARCH"
+                    best_order = f"FIGARCH({p},{o},{q})"
+            except Exception:
+                pass
+
+        if best_res is None:
+            for p, o, q in [(1, 0, 1), (1, 0, 2), (2, 0, 2)]:
+                try:
+                    am = arch_model(
+                        log_ret * 100,
+                        vol="GARCH",
+                        p=p, o=o, q=q,
+                        dist="studentst",
+                    )
+                    res = am.fit(disp="off", show_warning=False)
+                    if best_aic is None or res.aic < best_aic:
+                        best_aic = res.aic
+                        best_res = res
+                        best_model_type = "GARCH"
+                        best_order = f"GARCH({p},{o},{q})"
+                except Exception:
+                    pass
+
+        self._model_type = best_model_type
+        self._selected_order = best_order
+        self.sigma_fig = best_res.conditional_volatility / 100
+
+        cond_vol = best_res.conditional_volatility
+        cond_vol = cond_vol.replace(0, np.nan).dropna()
+        resid = (log_ret.loc[cond_vol.index] * 100 - best_res.params["mu"]) / cond_vol
+
+        try:
+            self.nu = max(4, stats.t.fit(resid.dropna(), floc=0, fscale=1)[0])
+        except Exception:
+            self.nu = 5.0
+
+    def _get_residuals(self, log_ret: pd.Series) -> pd.Series:
+        cond_vol = self.sigma_fig * 100
+        cond_vol = cond_vol.replace(0, np.nan).dropna()
+        return log_ret.loc[cond_vol.index] * 100 / cond_vol
+
+    def _calibrate_factor(self, prices: pd.Series, log_ret: pd.Series) -> None:
+        if not self._calibrate:
+            self._cal_factor = 0.85
+            return
+
+        cal_window = min(24, len(prices) // 4)
+        if cal_window < 10:
+            self._cal_factor = 0.85
+            return
+
+        target_coverage = 0.95
+        best_factor = 0.85
+
+        try:
+            train_end_idx = len(prices) - cal_window
+            if train_end_idx < 60:
+                self._cal_factor = 0.85
+                return
+
+            train_prices = prices.iloc[:train_end_idx]
+            test_prices = prices.iloc[train_end_idx:]
+
+            temp_engine = GBMEngine(n_sims=1000, random_seed=42)
+            temp_engine.fit(train_prices)
+
+            hits = 0
+            total = 0
+            for i in range(len(test_prices) - 1):
+                idx = train_end_idx + i
+                lookback = prices.iloc[max(0, idx - 500):idx]
+                if len(lookback) < 60:
+                    continue
+
+                te = GBMEngine(n_sims=1000, random_seed=42)
+                te.fit(lookback)
+                low, high, _, _ = te.predict_interval(confidence=0.95)
+                actual = float(prices.iloc[idx])
+                if low <= actual <= high:
+                    hits += 1
+                total += 1
+
+            if total > 0:
+                observed = hits / total
+                if observed > target_coverage + 0.03:
+                    best_factor = 0.75
+                elif observed > target_coverage + 0.01:
+                    best_factor = 0.80
+                elif observed < target_coverage - 0.03:
+                    best_factor = 0.92
+                elif observed < target_coverage - 0.01:
+                    best_factor = 0.88
+
+        except Exception:
+            best_factor = 0.85
+
+        self._cal_factor = max(0.5, min(1.5, best_factor))
 
     def predict_interval(
         self, confidence: float = 0.95, n_steps: int = 1
     ) -> tuple:
-        """
-        Predict the confidence interval for the next bar(s).
-
-        Parameters
-        ----------
-        confidence : float
-            Confidence level (default 0.95 → 95% CI).
-        n_steps : int
-            Number of steps ahead to simulate. Default 1.
-
-        Returns
-        -------
-        tuple
-            (low, high, simulated_prices, mean_price)
-        """
         if not self._fitted:
             raise RuntimeError("Call .fit() before .predict_interval()")
 
         alpha = 1 - confidence
         paths = self._simulate_mc(n_steps=n_steps)
 
-        # Extract terminal prices
         terminal_prices = paths[:, -1]
 
         low = np.percentile(terminal_prices, (alpha / 2) * 100)
@@ -228,37 +260,13 @@ class GBMEngine:
     def predict_range_for_bars(
         self, n_bars: int = 50, confidence: float = 0.95
     ) -> list:
-        """
-        Generate prediction intervals for the last N bars (for chart ribbon).
-
-        This is a retrospective visualization: for each of the last N bars,
-        what was the model's predicted 95% range?
-
-        Note: This uses the CURRENT model fit, so it's illustrative
-        (not a true walk-forward backtest).
-
-        Parameters
-        ----------
-        n_bars : int
-            Number of recent bars to show ranges for.
-        confidence : float
-            Confidence level.
-
-        Returns
-        -------
-        list[dict]
-            List of {"low": float, "high": float} for each bar.
-        """
         if not self._fitted:
             raise RuntimeError("Call .fit() before .predict_range_for_bars()")
 
-        # Use the current fit's conditional volatility to estimate
-        # a simple range for each of the last N bars
         alpha = 1 - confidence
         z_low = stats.t.ppf(alpha / 2, df=self.nu)
         z_high = stats.t.ppf(1 - alpha / 2, df=self.nu)
 
-        # Scale factor for t-distribution variance
         scale = np.sqrt((self.nu - 2) / self.nu) if self.nu > 2 else 1.0
 
         ranges = []
@@ -271,14 +279,6 @@ class GBMEngine:
         return ranges
 
     def _simulate_mc(self, n_steps: int = 1) -> np.ndarray:
-        """
-        Run Monte Carlo simulation of the GBM paths.
-
-        Returns
-        -------
-        np.ndarray
-            Shape (n_sims, n_steps + 1). First column is S0.
-        """
         out = np.zeros((self.n_sims, n_steps + 1))
 
         for i in range(self.n_sims):
@@ -288,12 +288,6 @@ class GBMEngine:
         return out
 
     def _simulate_single_path(self, n_steps: int) -> tuple:
-        """
-        Simulate a single GBM path with FIGARCH volatility
-        and entropy-based crisis detection.
-
-        Adapted from the starter notebook's simulate_cyber_gbm().
-        """
         S = np.zeros(n_steps + 1)
         V = np.zeros(n_steps + 1)
         S[0] = self.S0
@@ -304,63 +298,44 @@ class GBMEngine:
         H_max = max(self.H_series.max(), 1e-10)
         M_max = max(self.M_series.max(), 1e-10)
 
-        # Use the latest values for indicators
         H_val_raw = self.H_series.iloc[-1] if not np.isnan(self.H_series.iloc[-1]) else 0
         M_val_raw = self.M_series.iloc[-1] if not np.isnan(self.M_series.iloc[-1]) else 0
         redundancy_val = self.redundancy.iloc[-1] if not np.isnan(self.redundancy.iloc[-1]) else 1.0
-        info_val = self.info_filter.iloc[-1] if not np.isnan(self.info_filter.iloc[-1]) else 0.0
 
         for t in range(1, n_steps + 1):
             H_val = min(H_val_raw / H_max, 1.0)
             M_val = min(M_val_raw / M_max, 1.0)
 
-            # Crisis detection
             crisis = (H_val > 0.8) or (M_val > 0.8)
             delta_t = params["delta"] if crisis else 0.0
 
-            # Conditional variance update
             sigma2 = (
-                self.sigma_fig.iloc[-1] ** 2
+                sigma2
                 * (1 + params["alpha"] * H_val + delta_t * M_val)
                 + params["gamma"] * (self.bar_sigma2 - sigma2)
             )
 
-            # Apply redundancy and information filters
             sigma2 *= max(1e-12, redundancy_val)
-            # Info filter effect removed — FIGARCH already models volatility
-            # clustering; this extra boost was making intervals too wide.
-            # sigma2 *= 1 + 0.2 * info_val
 
-            # Calibration factor: FIGARCH's long-memory component tends
-            # to overestimate next-hour variance because its 500-bar
-            # training window includes older, more volatile regimes.
-            # Empirically calibrated on 200+ bar walk-forward tests.
-            sigma2 *= 0.85
+            sigma2 *= self._cal_factor
 
-            # Clamp variance to sane range
             sigma2 = max(1e-12, min(sigma2, 0.5))
 
-            # Student-t innovation (fat tails)
-            Z = np.random.standard_t(self.nu) * np.sqrt(
+            Z = self.rng.standard_t(self.nu) * np.sqrt(
                 (self.nu - 2) / self.nu
             )
 
-            # GBM step
             S[t] = S[t - 1] * np.exp(
                 (self.mu - 0.5 * sigma2) * self.DT
                 + np.sqrt(sigma2 * self.DT) * Z
             )
             V[t] = sigma2
 
-            # Adaptive parameter update
             params = self._update_params(params, sigma2, t)
 
         return S, V
 
     def _update_params(self, params: dict, sigma2: float, t: int) -> dict:
-        """
-        Adaptively update model parameters based on variance error.
-        """
         err = sigma2 - self.bar_sigma2
         lr = params["eta"] / (1 + t ** 0.55)
         params["gamma"] = np.clip(params["gamma"] + lr * err, 0.01, 0.5)
@@ -370,22 +345,6 @@ class GBMEngine:
     def _rolling_entropy(
         x: pd.Series, window: int = 60, bins: int = 20
     ) -> pd.Series:
-        """
-        Compute rolling Shannon entropy of a time series.
-
-        Entropy measures the "disorder" or unpredictability of
-        recent returns. High entropy → uncertain/chaotic period.
-
-        Parameters
-        ----------
-        x : pd.Series
-            Input series (typically standardized residuals).
-        window : int
-            Rolling window size.
-        bins : int
-            Number of histogram bins for density estimation.
-        """
-
         def _entropy(v):
             p, _ = np.histogram(v, bins=bins, density=True)
             p = p[p > 0]
@@ -394,14 +353,6 @@ class GBMEngine:
         return x.rolling(window).apply(_entropy, raw=True)
 
     def get_volatility_regime(self) -> str:
-        """
-        Classify the current volatility regime.
-
-        Returns
-        -------
-        str
-            One of "🟢 Calm", "🟡 Moderate", "🔴 Crisis"
-        """
         if not self._fitted:
             return "Unknown"
 
@@ -419,11 +370,14 @@ class GBMEngine:
             return "🟢 Calm"
 
     def get_model_info(self) -> dict:
-        """
-        Return key model parameters for display.
-        """
         if not self._fitted:
             return {}
+
+        tag = self._model_type
+        if self._model_type == "GARCH":
+            model_label = f"{tag} + STUDENT-T"
+        else:
+            model_label = f"{self._selected_order} + STUDENT-T"
 
         return {
             "current_price": float(self.S0),
@@ -432,10 +386,11 @@ class GBMEngine:
             "latest_sigma": float(self.sigma_fig.iloc[-1]),
             "mean_sigma2": float(self.bar_sigma2),
             "volatility_regime": self.get_volatility_regime(),
+            "model_type": tag,
+            "model_label": model_label,
         }
 
 
-# ─── Quick self-test ─────────────────────────────────────────────
 if __name__ == "__main__":
     from data_fetcher import fetch_latest_bars, get_close_prices
 
@@ -445,8 +400,11 @@ if __name__ == "__main__":
     print(f"Got {len(prices)} bars. Latest: ${prices.iloc[-1]:,.2f}")
 
     print("\nFitting GBM model...")
-    engine = GBMEngine(n_sims=1000)  # Fewer sims for quick test
+    engine = GBMEngine(n_sims=1000, random_seed=42)
     engine.fit(prices)
+
+    print(f"Model type: {engine._model_type}")
+    print(f"Calibration factor: {engine._cal_factor:.4f}")
 
     print("\nPredicting next-hour interval...")
     low, high, sims, mean_p = engine.predict_interval()

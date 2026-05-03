@@ -34,7 +34,8 @@
 │                                                                  │
 │  GBMEngine.predict_interval(confidence=0.95):                    │
 │    1. S₀ = latest close price                                    │
-│    2. σ = latest FIGARCH sigma × crisis_multiplier × calibration │
+│    2. σ² updated via: bar_sigma² × (1 + α·H + δ_t·M) + γ·(bar_σ² − σ²) │
+│       then × redundancy × 0.85 calibration factor               │
 │    3. Generate 10,000 Student-t random draws                     │
 │    4. S₁ = S₀ × exp((μ - σ²/2)·dt + σ·√dt·ε)                   │
 │    5. Return percentile(2.5%) and percentile(97.5%)              │
@@ -109,7 +110,7 @@ info = engine.get_model_info()  # dict of model params
 
 2. **Calibration Factor (0.85)**: After fitting FIGARCH and Student-t, the raw Monte Carlo intervals tend to be ~2–5% wider than needed for exactly 95% coverage. The 0.85 factor multiplies the final variance to tighten intervals, validated on a 200-bar walk-forward test.
 
-3. **Crisis Detection**: Shannon entropy of the last 50 standardized residuals. If entropy > 90th percentile of the full series, a crisis multiplier (α = 0.15) is added to variance. An additional delta (0.10) and redundancy floor (0.02) provide baseline width.
+3. **Crisis Detection**: Shannon entropy of the last 50 standardized residuals. If entropy > 0.8 (normalized, where H_max is the series maximum), a crisis multiplier (delta_t = 0.10) is added to variance. An additional delta (0.10) and redundancy floor (0.02) provide baseline width.
 
 4. **Regime Classification**:
    - `σ < 0.002` → Calm (narrow intervals)

@@ -5,6 +5,5 @@ scipy>=1.10.0
 arch>=6.0.0
 plotly>=5.15.0
 requests>=2.31.0
-tqdm>=4.65.0
 gspread>=5.10.0
 google-auth>=2.22.0

@@ -62,27 +62,30 @@ else:
     .param-row:hover{background:rgba(0,0,0,0.03)!important}
     </style>""", unsafe_allow_html=True)
 
+st.markdown("""<style>
+@media (max-width: 768px) {
+    .stPlotlyChart > div { min-width: 100% !important; }
+    .element-container { width: 100% !important; }
+}
+.stPlotlyChart { width: 100% !important; }
+</style>""", unsafe_allow_html=True)
+
 
 # ── Cached Data Functions ────────────────────────────────
 @st.cache_data(ttl=300)
 def get_live_data():
     df = fetch_latest_bars(num_bars=500)
     prices = get_close_prices(df)
-    engine = GBMEngine(n_sims=10_000)
+    engine = GBMEngine(n_sims=10_000, random_seed=42)
     engine.fit(prices)
     low, high, sims, mean_p = engine.predict_interval(confidence=0.95)
     info = engine.get_model_info()
 
-    # Chart ribbon
-    pw = high - low
-    ls = engine.sigma_fig.iloc[-1]
+    # Chart ribbon — use per-bar sigma from predict_range_for_bars
     cp = prices.tail(50)
-    sv = engine.sigma_fig.tail(50)
-    cl, ch = [], []
-    for i, (_, p) in enumerate(cp.items()):
-        r = sv.iloc[i] / ls if i < len(sv) and ls > 0 else 1
-        hw = (pw / 2) * r
-        cl.append(p - hw); ch.append(p + hw)
+    half_widths = engine.predict_range_for_bars(n_bars=50, confidence=0.95)
+    cl = [float(cp.iloc[i]) - hw for i, hw in enumerate(half_widths)]
+    ch = [float(cp.iloc[i]) + hw for i, hw in enumerate(half_widths)]
 
     # Extra analytics
     log_ret = np.log(prices / prices.shift(1)).dropna()
@@ -181,16 +184,29 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    st.checkbox(f"{'◐' if is_dark else '◑'} {'DARK' if is_dark else 'LIGHT'} MODE",
-        value=not is_dark, on_change=toggle_theme, key="theme_toggle")
+    st.button(f"{'◐' if is_dark else '◑'} TOGGLE THEME", on_click=toggle_theme)
 
     # ── Load Data ────────────────────────────────────────
     backtest = get_backtest_metrics()
     try:
-        with st.spinner(""):
+        with st.spinner("Fetching live BTCUSDT data from Binance..."):
             d = get_live_data()
     except Exception as e:
-        st.error(f"Model error: {e}"); return
+        st.warning("⚠️ Live data unavailable. Showing cached metrics only.")
+        if backtest:
+            d = {
+                "current_price": 0, "predicted_low": 0, "predicted_high": 0,
+                "mean_prediction": 0, "model_info": {}, "change_24h": 0,
+                "change_7d": 0, "high_24h": 0, "low_24h": 0,
+                "avg_vol_24h": 0, "avg_vol_7d": 0, "nu": 0,
+                "chart_dates": [], "chart_prices": [], "chart_lows": [],
+                "chart_highs": [], "log_returns": [], "log_ret_dates": [],
+                "vol_series": [], "vol_dates": [], "recent_ret": [],
+                "recent_ret_dates": [], "sims_terminal": [], "prediction_time": "",
+            }
+        else:
+            st.error(f"Model error: {e}")
+            return
 
     current = d["current_price"]
     low, high = d["predicted_low"], d["predicted_high"]
@@ -235,8 +251,23 @@ def main():
                 <div class="metric-sub">{fm['hits']} HITS · {fm['misses']} MISSES</div></div>
         </div>
         """, unsafe_allow_html=True)
-
-    # ── Prediction Range ─────────────────────────────────
+    else:
+        st.markdown("""
+        <div class="metrics-grid">
+            <div class="metric-card"><div class="metric-label">COVERAGE</div>
+                <div class="metric-value">—</div>
+                <div class="metric-sub">Run `python backtest.py`</div></div>
+            <div class="metric-card"><div class="metric-label">AVG WIDTH</div>
+                <div class="metric-value">—</div>
+                <div class="metric-sub">Expected ~$1,200</div></div>
+            <div class="metric-card"><div class="metric-label">WINKLER</div>
+                <div class="metric-value">—</div>
+                <div class="metric-sub">Lower is better</div></div>
+            <div class="metric-card"><div class="metric-label">PREDICTIONS</div>
+                <div class="metric-value">—</div>
+                <div class="metric-sub">720 expected · 30 days</div></div>
+        </div>
+        """, unsafe_allow_html=True)
     st.markdown(f"""
     <div class="prediction-card">
         <div class="pred-left">
@@ -255,9 +286,10 @@ def main():
     """, unsafe_allow_html=True)
 
     # ── Main Chart ───────────────────────────────────────
-    st.markdown("""<div class="chart-section"><div class="chart-header">
+    model_tag = info.get("model_label", "FIGARCH + STUDENT-T")
+    st.markdown(f"""<div class="chart-section"><div class="chart-header">
         <div class="chart-title">Price — Last 50 Bars with 95% Confidence Ribbon</div>
-        <div class="chart-tag">FIGARCH(1,0,1) + STUDENT-T</div>
+        <div class="chart-tag">{model_tag}</div>
     </div></div>""", unsafe_allow_html=True)
 
     dates = d["chart_dates"]
@@ -344,10 +376,114 @@ def main():
         st.plotly_chart(fig_h, width='stretch')
 
     # ═══════════════════════════════════════════════════════
-    # MARKET STATS + MODEL PARAMS + HISTORY (3-panel bottom)
+    # MODEL DIFFERENTIATORS (Expandable)
     # ═══════════════════════════════════════════════════════
-    def stat_row(k, v):
-        return f'<div class="param-row"><span class="param-key">{k}</span><span class="param-val">{v}</span></div>'
+    with st.expander("📊 Model Analysis — Calibration & Differentiators"):
+        from model.evaluator import compute_calibration_curve, decompose_winkler
+
+        dcol1, dcol2, dcol3 = st.columns(3)
+
+        # ── Panel 1: Rolling Coverage ─────────────────────
+        with dcol1:
+            st.markdown("""<div class="chart-section"><div class="chart-header">
+                <div class="chart-title">Rolling 50-Bar Coverage</div>
+                <div class="chart-tag">COVERAGE</div>
+            </div></div>""", unsafe_allow_html=True)
+            if backtest and len(backtest.get("predictions_data", [])) >= 50:
+                preds_data = backtest["predictions_data"]
+                rolling_cov = []
+                for i in range(50, len(preds_data)):
+                    window = preds_data[i - 50:i]
+                    hits = sum(p.get("coverage_95", 0) for p in window)
+                    rolling_cov.append(hits / 50)
+                x_vals = list(range(50, len(preds_data)))
+                fig_rc = go.Figure(go.Scatter(
+                    x=x_vals, y=rolling_cov, mode='lines',
+                    line=dict(color=tc["green"] if rolling_cov[-1] >= 0.93 else tc["red"], width=1.5),
+                    hovertemplate='Bar %{x}<br>Coverage: %{y:.1%}<extra></extra>'))
+                rc = base_layout(tc, 220)
+                rc["yaxis"]["tickformat"] = ".0%"
+                rc["yaxis"]["range"] = [0.7, 1.05]
+                rc["shapes"] = [dict(
+                    type="line", x0=min(x_vals), x1=max(x_vals),
+                    y0=0.95, y1=0.95,
+                    line=dict(color=tc["red"], width=1, dash="dash")
+                )]
+                fig_rc.update_layout(**rc)
+                st.plotly_chart(fig_rc, width='stretch')
+            else:
+                st.info("Run backtest.py for rolling coverage")
+
+        # ── Panel 2: Calibration Curve ──────────────────────
+        with dcol2:
+            st.markdown("""<div class="chart-section"><div class="chart-header">
+                <div class="chart-title">Reliability Diagram</div>
+                <div class="chart-tag">CALIBRATION</div>
+            </div></div>""", unsafe_allow_html=True)
+            if backtest and len(backtest.get("predictions_data", [])) >= 30:
+                cc = compute_calibration_curve(backtest["predictions_data"])
+                fig_cal = go.Figure()
+                fig_cal.add_trace(go.Scatter(
+                    x=cc["expected"], y=cc["actual"],
+                    mode='lines+markers', line=dict(color=tc["green"], width=2),
+                    marker=dict(size=8),
+                    hovertemplate='Expected: %{x:.0%}<br>Actual: %{y:.1%}<extra></extra>'))
+                fig_cal.add_trace(go.Scatter(
+                    x=[0.5, 0.99], y=[0.5, 0.99],
+                    mode='lines', line=dict(color=tc["text"], width=1, dash="dash"),
+                    showlegend=False))
+                cal_layout = base_layout(tc, 220)
+                cal_layout["xaxis"]["tickformat"] = ".0%"
+                cal_layout["yaxis"]["tickformat"] = ".0%"
+                cal_layout["xaxis"]["range"] = [0.5, 1.0]
+                cal_layout["yaxis"]["range"] = [0.5, 1.05]
+                fig_cal.update_layout(**cal_layout)
+                st.plotly_chart(fig_cal, width='stretch')
+            else:
+                st.info("Run backtest.py for calibration")
+
+        # ── Panel 3: Hour-of-Day Analysis ──────────────────
+        with dcol3:
+            st.markdown("""<div class="chart-section"><div class="chart-header">
+                <div class="chart-title">Coverage by Hour (UTC)</div>
+                <div class="chart-tag">BY HOUR</div>
+            </div></div>""", unsafe_allow_html=True)
+            if backtest and len(backtest.get("predictions_data", [])) >= 24:
+                preds_data = backtest["predictions_data"]
+                hourly = {}
+                for p in preds_data:
+                    try:
+                        hr = pd.to_datetime(p.get("bar_timestamp", "")).hour
+                        if hr not in hourly:
+                            hourly[hr] = {"hits": 0, "total": 0}
+                        hourly[hr]["total"] += 1
+                        hourly[hr]["hits"] += p.get("coverage_95", 0)
+                    except Exception:
+                        pass
+                hours = sorted(hourly.keys())
+                coverages = [(hourly[h]["hits"] / hourly[h]["total"]) if hourly[h]["total"] > 0 else 0 for h in hours]
+                cov_colors = [tc["green"] if c >= 0.93 else tc["red"] for c in coverages]
+                fig_hod = go.Figure(go.Bar(
+                    x=[f"{h:02d}:00" for h in hours], y=coverages,
+                    marker_color=cov_colors,
+                    hovertemplate='%{x}<br>Coverage: %{y:.1%}<extra></extra>'))
+                hod_layout = base_layout(tc, 220)
+                hod_layout["yaxis"]["tickformat"] = ".0%"
+                hod_layout["yaxis"]["range"] = [0.7, 1.05]
+                fig_hod.update_layout(**hod_layout)
+                st.plotly_chart(fig_hod, width='stretch')
+            else:
+                st.info("Run backtest.py for hour analysis")
+
+        # Winkler decomposition
+        if backtest and len(backtest.get("predictions_data", [])) >= 30:
+            wd = decompose_winkler(backtest["predictions_data"])
+            n_total = wd["n_hits"] + wd["n_misses"]
+            st.markdown(f"""<div class="chart-section">
+                <div class="chart-title" style="font-size:11px;color:{tc['text']}">
+                    Winkler Decomposition: Width={wd['mean_width']:.0f} · Penalty={wd['mean_penalty']:.0f} (from {wd['n_misses']} misses) · Ratio={wd['penalty_ratio']:.1%}
+                </div>
+            </div>""", unsafe_allow_html=True)
 
     # Market stats card (HTML)
     stats_html = f"""
@@ -396,7 +532,17 @@ def main():
         })
     hdf = store.get_history_dataframe()
     if len(hdf) > 0:
-        st.dataframe(hdf, width='stretch', hide_index=True)
+        col_map = {
+            "timestamp": "Time (UTC)",
+            "current_price": "BTC Price",
+            "predicted_low_95": "Predicted Low",
+            "predicted_high_95": "Predicted High",
+            "actual_close": "Actual Close",
+            "hit": "Hit",
+            "winkler": "Winkler",
+        }
+        display_df = hdf.rename(columns=col_map)
+        st.dataframe(display_df, width='stretch', hide_index=True)
     else:
         st.markdown(f"""<p style="font-family:Inter,sans-serif;font-size:13px;
             color:{'rgba(255,255,255,0.3)' if is_dark else 'rgba(0,0,0,0.3)'};
@@ -404,10 +550,11 @@ def main():
             unsafe_allow_html=True)
 
     # ── Footer ───────────────────────────────────────────
+    model_footer = info.get("model_label", "GBM + FIGARCH + Student-t")
     st.markdown(f"""
     <div class="site-footer">
         <div class="footer-text">AlphaI × Polaris Challenge &nbsp;·&nbsp;
-            GBM + FIGARCH(1,0,1) + Student-t &nbsp;·&nbsp; Binance BTCUSDT 1H</div>
+            {model_footer} &nbsp;·&nbsp; Binance BTCUSDT 1H</div>
         <div class="footer-mono">{now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}</div>
     </div>""", unsafe_allow_html=True)
 

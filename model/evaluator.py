@@ -17,6 +17,7 @@ Where α = 0.05 for a 95% confidence interval.
 
 import numpy as np
 import pandas as pd
+import scipy.stats as stats
 from typing import List, Dict, Tuple
 
 
@@ -168,7 +169,6 @@ def predictions_to_dataframe(
     if "bar_timestamp" in df.columns:
         df["bar_timestamp"] = pd.to_datetime(df["bar_timestamp"])
 
-    # Add computed columns
     if all(
         col in df.columns
         for col in ["actual_close", "predicted_low_95", "predicted_high_95"]
@@ -186,6 +186,74 @@ def predictions_to_dataframe(
         )
 
     return df
+
+
+def compute_calibration_curve(
+    predictions: List[Dict],
+    confidence_levels: list = None,
+) -> dict:
+    """
+    Compute reliability diagram (calibration curve).
+
+    Compares expected coverage vs actual coverage across confidence levels.
+    For each level, rescales the stored 95% intervals proportionally.
+    """
+    if confidence_levels is None:
+        confidence_levels = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]
+
+    df = predictions_to_dataframe(predictions)
+
+    ref_conf = 0.95
+    ref_z = stats.t.ppf(1 - (1 - ref_conf) / 2, df=max(4, len(df) - 1))
+
+    expected = []
+    actual = []
+
+    for conf in confidence_levels:
+        alpha = 1 - conf
+        z = stats.t.ppf(1 - alpha / 2, df=max(4, len(df) - 1))
+        scale = z / ref_z
+
+        mid = (df["predicted_low_95"] + df["predicted_high_95"]) / 2
+        width = (df["predicted_high_95"] - df["predicted_low_95"]) / 2
+        adj_low = mid - width * scale
+        adj_high = mid + width * scale
+
+        hits = ((df["actual_close"] >= adj_low) & (df["actual_close"] <= adj_high)).mean()
+        actual_cov = float(hits) if not pd.isna(hits) else conf
+
+        expected.append(conf)
+        actual.append(actual_cov)
+
+    return {"expected": expected, "actual": actual}
+
+
+def decompose_winkler(predictions: List[Dict]) -> dict:
+    """
+    Decompose Winkler score into width and penalty components.
+
+    Returns mean width (from hits) and mean penalty (from misses).
+    """
+    df = predictions_to_dataframe(predictions)
+    hits_df = df[df["hit"] == 1]
+    misses_df = df[df["hit"] == 0]
+
+    mean_width = float(hits_df["winkler"].mean()) if len(hits_df) > 0 else 0.0
+    mean_penalty = 0.0
+    if len(misses_df) > 0:
+        hit_winklers = hits_df["winkler"].sum() if len(hits_df) > 0 else 0.0
+        total_winklers = df["winkler"].sum()
+        mean_penalty = float((total_winklers - hit_winklers) / len(misses_df))
+
+    penalty_ratio = mean_penalty / (mean_width + mean_penalty) if (mean_width + mean_penalty) > 0 else 0.0
+
+    return {
+        "mean_width": mean_width,
+        "mean_penalty": mean_penalty,
+        "penalty_ratio": penalty_ratio,
+        "n_hits": len(hits_df),
+        "n_misses": len(misses_df),
+    }
 
 
 # ─── Quick self-test ─────────────────────────────────────────────

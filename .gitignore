@@ -26,6 +26,11 @@ Thumbs.db
 
 # Local persistence (not needed in repo)
 prediction_history.json
+predictions.db
+test_output.jsonl
+
+# Kilo local tooling
+.kilo/
 
 # Original notebook (keep copy_of_gbm.py as reference)
 Copy_of_GBM.ipynb
