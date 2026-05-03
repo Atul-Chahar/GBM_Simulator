@@ -138,7 +138,7 @@ class GBMEngine:
                     p=p, o=o, q=q,
                     dist="studentst",
                 )
-                res = am.fit(disp="off", show_warning=False)
+                res = am.fit(disp="off", show_warning=False, options={"maxiter": 200})
                 if best_aic is None or res.aic < best_aic:
                     best_aic = res.aic
                     best_res = res
@@ -156,7 +156,7 @@ class GBMEngine:
                         p=p, o=o, q=q,
                         dist="studentst",
                     )
-                    res = am.fit(disp="off", show_warning=False)
+                    res = am.fit(disp="off", show_warning=False, options={"maxiter": 200})
                     if best_aic is None or res.aic < best_aic:
                         best_aic = res.aic
                         best_res = res
