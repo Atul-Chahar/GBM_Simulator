@@ -144,6 +144,9 @@ class PredictionStore:
                 "https://www.googleapis.com/auth/drive",
             ]
 
+            if not hasattr(st, 'secrets') or "gcp_service_account" not in st.secrets:
+                raise KeyError("gcp_service_account not found in st.secrets")
+
             creds_dict = dict(st.secrets["gcp_service_account"])
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
             client = gspread.authorize(creds)
