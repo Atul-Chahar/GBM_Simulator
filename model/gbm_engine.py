@@ -205,7 +205,7 @@ class GBMEngine:
             train_prices = prices.iloc[:train_end_idx]
             test_prices = prices.iloc[train_end_idx:]
 
-            temp_engine = GBMEngine(n_sims=1000, random_seed=42)
+            temp_engine = GBMEngine(n_sims=1000, random_seed=42, calibrate=False)
             temp_engine.fit(train_prices)
 
             hits = 0
@@ -216,7 +216,7 @@ class GBMEngine:
                 if len(lookback) < 60:
                     continue
 
-                te = GBMEngine(n_sims=1000, random_seed=42)
+                te = GBMEngine(n_sims=1000, random_seed=42, calibrate=False)
                 te.fit(lookback)
                 low, high, _, _ = te.predict_interval(confidence=0.95)
                 actual = float(prices.iloc[idx])
