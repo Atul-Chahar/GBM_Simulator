@@ -194,7 +194,8 @@ class PredictionStore:
 
         df = pd.DataFrame(history)
         if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors='coerce', utc=True)
+            df.dropna(subset=["timestamp"], inplace=True)
             df.sort_values("timestamp", ascending=False, inplace=True)
 
         return df
