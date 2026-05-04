@@ -113,6 +113,7 @@ def get_live_data_v2():
         "chart_dates": cp.index.tolist(), "chart_prices": cp.values.tolist(),
         "chart_lows": cl, "chart_highs": ch,
         "prediction_time": (prices.index[-1] + pd.Timedelta(hours=1)).isoformat(),
+        "all_prices": prices,
         # Extra data
         "log_returns": log_ret.tail(100).values.tolist(),
         "log_ret_dates": log_ret.tail(100).index.tolist(),
@@ -529,8 +530,12 @@ def main():
         )
     store = st.session_state.prediction_store
     
-    # Verify past predictions using the last 50 closed bars
-    price_map = {dt.isoformat(): p for dt, p in zip(d["chart_dates"], d["chart_prices"])}
+    # Verify past predictions using ALL closed bars (up to 500), not just chart's 50
+    all_prices = d.get("all_prices")
+    if all_prices is not None:
+        price_map = {dt.isoformat(): p for dt, p in zip(all_prices.index, all_prices.values)}
+    else:
+        price_map = {dt.isoformat(): p for dt, p in zip(d["chart_dates"], d["chart_prices"])}
     verified_count = store.verify_predictions(price_map)
     st.info(f"Verified {verified_count} predictions")
 
