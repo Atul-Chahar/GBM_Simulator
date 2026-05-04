@@ -533,15 +533,15 @@ def main():
     # Verify past predictions using ALL closed bars (up to 500), not just chart's 50
     all_prices = d.get("all_prices")
     if all_prices is not None:
-        price_map = {dt.isoformat(): p for dt, p in zip(all_prices.index, all_prices.values)}
+        price_map = {int(dt.timestamp() * 1000): p for dt, p in zip(all_prices.index, all_prices.values)}
     else:
-        price_map = {dt.isoformat(): p for dt, p in zip(d["chart_dates"], d["chart_prices"])}
+        price_map = {int(dt.timestamp() * 1000): p for dt, p in zip(d["chart_dates"], d["chart_prices"])}
     verified_count = store.verify_predictions(price_map)
     st.info(f"Verified {verified_count} predictions")
 
     if store.should_save_new_prediction():
         store.save_prediction({
-            "timestamp": d["chart_dates"][-1].isoformat(), "current_price": current,
+            "timestamp": int(d["all_prices"].index[-1].timestamp() * 1000), "current_price": current,
             "predicted_low_95": low, "predicted_high_95": high,
         })
     hdf = store.get_history_dataframe()

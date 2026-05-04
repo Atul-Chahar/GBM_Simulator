@@ -42,48 +42,49 @@ def _migrate_json_to_sqlite(json_file: str, db_file: str) -> None:
     conn = sqlite3.connect(db_file)
     c = conn.cursor()
     c.execute("""
-        CREATE TABLE IF NOT EXISTS predictions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT UNIQUE NOT NULL,
-            current_price REAL,
-            predicted_low_95 REAL,
-            predicted_high_95 REAL,
-            actual_close REAL,
-            hit INTEGER,
-            winkler REAL,
-            verified INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            CREATE TABLE IF NOT EXISTS predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER UNIQUE NOT NULL,
+                current_price REAL,
+                predicted_low_95 REAL,
+                predicted_high_95 REAL,
+                actual_close REAL,
+                hit INTEGER,
+                winkler REAL,
+                verified INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
     for record in history:
-        ts_str = record.get("timestamp", "")
-        cp = record.get("current_price", 0)
-        ac = record.get("actual_close")
-        if cp == 0 and (ac == 0 or ac is None):
-            continue
-        if isinstance(ac, str) and not _is_numeric_string(ac):
-            continue
-        try:
-            ts = pd.to_datetime(ts_str, utc=True)
-            if ts > datetime.now(timezone.utc) + timedelta(hours=1):
+            ts_str = record.get("timestamp", "")
+            cp = record.get("current_price", 0)
+            ac = record.get("actual_close")
+            if cp == 0 and (ac == 0 or ac is None):
                 continue
-        except Exception:
-            continue
-        c.execute("""
-            INSERT OR IGNORE INTO predictions
-            (timestamp, current_price, predicted_low_95, predicted_high_95,
-             actual_close, hit, winkler, verified)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            ts_str,
-            record.get("current_price", 0),
-            record.get("predicted_low_95", 0),
-            record.get("predicted_high_95", 0),
-            record.get("actual_close"),
-            record.get("hit"),
-            record.get("winkler"),
-            1 if record.get("verified") else 0,
-        ))
+            if isinstance(ac, str) and not _is_numeric_string(ac):
+                continue
+            try:
+                ts = pd.to_datetime(ts_str, utc=True)
+                ts_ms = int(ts.timestamp() * 1000)
+                if ts_ms > datetime.now(timezone.utc).timestamp() * 1000 + 3600_000:
+                    continue
+            except Exception:
+                continue
+            c.execute("""
+                INSERT OR IGNORE INTO predictions
+                (timestamp, current_price, predicted_low_95, predicted_high_95,
+                 actual_close, hit, winkler, verified)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                ts_ms,
+                record.get("current_price", 0),
+                record.get("predicted_low_95", 0),
+                record.get("predicted_high_95", 0),
+                record.get("actual_close"),
+                record.get("hit"),
+                record.get("winkler"),
+                1 if record.get("verified") else 0,
+            ))
     conn.commit()
     conn.close()
 
@@ -116,7 +117,7 @@ class PredictionStore:
         c.execute("""
             CREATE TABLE IF NOT EXISTS predictions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT UNIQUE NOT NULL,
+                timestamp INTEGER UNIQUE NOT NULL,
                 current_price REAL,
                 predicted_low_95 REAL,
                 predicted_high_95 REAL,
@@ -164,14 +165,14 @@ class PredictionStore:
             self.use_gsheets = False
 
     def save_prediction(self, prediction: Dict) -> None:
-        ts_raw = prediction.get("timestamp", datetime.now(timezone.utc).isoformat())
+        ts_raw = prediction.get("timestamp", datetime.now(timezone.utc).timestamp() * 1000)
         try:
-            ts_iso = pd.to_datetime(ts_raw).tz_convert("UTC").isoformat()
+            ts_ms = int(pd.to_datetime(ts_raw).timestamp() * 1000) if isinstance(ts_raw, str) else int(ts_raw)
         except Exception:
-            ts_iso = str(ts_raw)
+            ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
         record = {
-            "timestamp": ts_iso,
+            "timestamp": ts_ms,
             "current_price": prediction.get("current_price", 0),
             "predicted_low_95": prediction.get("predicted_low_95", 0),
             "predicted_high_95": prediction.get("predicted_high_95", 0),
@@ -222,7 +223,7 @@ class PredictionStore:
         conn.commit()
         conn.close()
 
-    def verify_predictions(self, current_prices: Dict[str, float]) -> int:
+    def verify_predictions(self, current_prices: Dict[int, float]) -> int:
         history = self.get_history()
         verified_count = 0
 
@@ -230,14 +231,15 @@ class PredictionStore:
             if record.get("verified"):
                 continue
 
-            ts = record.get("timestamp", "")
-            try:
-                ts_iso = pd.to_datetime(ts).tz_convert("UTC").isoformat()
-            except Exception:
-                ts_iso = str(ts)
+            ts = record.get("timestamp", 0)
+            if not isinstance(ts, int):
+                try:
+                    ts = int(pd.to_datetime(ts).timestamp() * 1000)
+                except Exception:
+                    continue
 
-            if ts_iso in current_prices:
-                actual = current_prices[ts_iso]
+            if ts in current_prices:
+                actual = current_prices[ts]
                 low = record["predicted_low_95"]
                 high = record["predicted_high_95"]
 
@@ -287,7 +289,11 @@ class PredictionStore:
 
         df = pd.DataFrame(history)
         if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+            ts_col = df["timestamp"]
+            if ts_col.dtype == 'int64' or isinstance(ts_col.iloc[0], int):
+                df["timestamp"] = pd.to_datetime(ts_col, unit='ms', utc=True)
+            else:
+                df["timestamp"] = pd.to_datetime(ts_col, errors="coerce", utc=True)
             df.dropna(subset=["timestamp"], inplace=True)
             df.sort_values("timestamp", ascending=False, inplace=True)
 
@@ -298,9 +304,13 @@ class PredictionStore:
         if not history:
             return True
 
-        latest = max(history, key=lambda x: x.get("timestamp", ""))
+        latest = max(history, key=lambda x: x.get("timestamp", 0))
         try:
-            last_time = pd.to_datetime(latest["timestamp"], utc=True)
+            ts_val = latest["timestamp"]
+            if isinstance(ts_val, int):
+                last_time = pd.to_datetime(ts_val, unit='ms', utc=True)
+            else:
+                last_time = pd.to_datetime(ts_val, utc=True)
             now = datetime.now(timezone.utc)
             elapsed = (now - last_time).total_seconds()
             return elapsed > 1800
@@ -310,7 +320,7 @@ class PredictionStore:
     def _validate_and_purge(self) -> None:
         conn = self._get_conn()
         c = conn.cursor()
-        now = datetime.now(timezone.utc).isoformat()
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
         c.execute("SELECT COUNT(*) FROM predictions")
         total = c.fetchone()[0]
@@ -320,7 +330,7 @@ class PredictionStore:
 
         c.execute("DELETE FROM predictions WHERE current_price = 0 AND actual_close IS NULL")
         c.execute("DELETE FROM predictions WHERE actual_close = 0 AND hit IS NULL")
-        c.execute("DELETE FROM predictions WHERE timestamp > ?", (now,))
+        c.execute("DELETE FROM predictions WHERE timestamp > ?", (now_ms,))
 
         deleted = c.execute("SELECT changes()").fetchone()[0]
         conn.commit()
