@@ -304,7 +304,21 @@ class PredictionStore:
         if not history:
             return True
 
-        latest = max(history, key=lambda x: x.get("timestamp", 0))
+        def _get_ts_value(x):
+            ts = x.get("timestamp", 0)
+            if isinstance(ts, int):
+                return ts
+            if isinstance(ts, str):
+                try:
+                    return int(ts)
+                except ValueError:
+                    try:
+                        return int(pd.to_datetime(ts, utc=True).timestamp() * 1000)
+                    except Exception:
+                        return 0
+            return 0
+
+        latest = max(history, key=_get_ts_value)
         try:
             ts_val = latest["timestamp"]
             if isinstance(ts_val, int):
@@ -314,7 +328,7 @@ class PredictionStore:
             now = datetime.now(timezone.utc)
             elapsed = (now - last_time).total_seconds()
             return elapsed > 1800
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
             return True
 
     def _validate_and_purge(self) -> None:
@@ -330,7 +344,7 @@ class PredictionStore:
 
         c.execute("DELETE FROM predictions WHERE current_price = 0 AND actual_close IS NULL")
         c.execute("DELETE FROM predictions WHERE actual_close = 0 AND hit IS NULL")
-        c.execute("DELETE FROM predictions WHERE timestamp > ?", (now_ms,))
+        c.execute("DELETE FROM predictions WHERE typeof(timestamp) = 'integer' AND timestamp > ?", (now_ms,))
 
         deleted = c.execute("SELECT changes()").fetchone()[0]
         conn.commit()
